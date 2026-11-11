@@ -11,17 +11,26 @@ import {
 } from 'react-native';
 import { CURRENT_USER, INITIAL_POOLS } from './src/data/mockPools';
 import {
+  AtomicClaimResult,
   CatalogItem,
   GroupBuyPool,
+  NotificationPreferences,
   Participant,
   ParticipantShare,
   PoolMessage,
+  PoolNotificationAlert,
 } from './src/types/groupBuy';
 import {
   DEMO_PROFILES,
+  evaluateAtomicClaimTransition,
   PoolRepository,
   SupabaseConfig,
 } from './src/services/repository';
+import {
+  DEFAULT_NOTIFICATION_PREFS,
+  INITIAL_ALERTS,
+  NotificationService,
+} from './src/services/notifications';
 import {
   buildShareablePoolInviteText,
   getCaseSplitStatus,
@@ -38,6 +47,10 @@ import {
   CreatePoolModal,
   JoinByCodeModal,
 } from './src/components/ActionModals';
+import {
+  LiveToastBanner,
+  NotificationCenterModal,
+} from './src/components/NotificationCenterModal';
 import { SupabaseSetupCard } from './src/components/SupabaseSetupCard';
 
 type ActiveTab = 'catalog' | 'splits' | 'chat' | 'host_sheet' | 'architecture';
@@ -51,9 +64,19 @@ export default function App() {
   const [activeUser, setActiveUser] = useState<Participant>(CURRENT_USER);
   const [activeTab, setActiveTab] = useState<ActiveTab>('catalog');
   const [itemFilter, setItemFilter] = useState<ItemFilter>('all');
+
   const [showAddItemModal, setShowAddItemModal] = useState(false);
   const [showCreatePoolModal, setShowCreatePoolModal] = useState(false);
   const [showJoinByCodeModal, setShowJoinByCodeModal] = useState(false);
+  const [showNotificationModal, setShowNotificationModal] = useState(false);
+
+  const [alerts, setAlerts] = useState<PoolNotificationAlert[]>(INITIAL_ALERTS);
+  const [notifPrefs, setNotifPrefs] = useState<NotificationPreferences>(
+    DEFAULT_NOTIFICATION_PREFS
+  );
+  const [liveToast, setLiveToast] = useState<PoolNotificationAlert | null>(
+    null
+  );
 
   const [syncStatus, setSyncStatus] = useState<{
     mode: 'local' | 'supabase_live' | 'supabase_error';
@@ -72,6 +95,19 @@ export default function App() {
       minute: '2-digit',
     });
   };
+
+  const pushAlerts = useCallback(
+    async (newItems: PoolNotificationAlert[]) => {
+      if (newItems.length === 0) return;
+      setLiveToast(newItems[0]);
+      setAlerts((prev) => {
+        const merged = [...newItems, ...prev].slice(0, 40);
+        NotificationService.saveAlerts(merged);
+        return merged;
+      });
+    },
+    []
+  );
 
   const refreshPools = useCallback(async (realtimeTable?: string) => {
     const cfg = PoolRepository.getCurrentConfig();
@@ -112,10 +148,17 @@ export default function App() {
     let unsubscribeRealtime = () => {};
 
     const bootstrap = async () => {
-      const savedUser = await PoolRepository.loadActiveUser();
-      setActiveUser(savedUser);
+      const [savedUser, savedAlerts, savedPrefs, cfg] = await Promise.all([
+        PoolRepository.loadActiveUser(),
+        NotificationService.loadAlerts(),
+        NotificationService.loadPreferences(),
+        PoolRepository.initConfig(),
+      ]);
 
-      const cfg = await PoolRepository.initConfig();
+      setActiveUser(savedUser);
+      setAlerts(savedAlerts);
+      setNotifPrefs(savedPrefs);
+
       await refreshPools();
 
       if (cfg.enabled) {
@@ -162,9 +205,17 @@ export default function App() {
     }
   };
 
+  /**
+   * Race-Condition-Safe Atomic Case-Split & Wholesale Claim Handler
+   */
   const handleUpdateQuantity = async (itemId: string, delta: number) => {
     if (activePool.status === 'locked') return;
 
+    const targetItem = activePool.items.find((i) => i.id === itemId);
+    if (!targetItem) return;
+
+    const prevPoolSnapshot = activePool;
+    let atomicResult: AtomicClaimResult | null = null;
     let nextQuantityForSync = 0;
 
     const updatedPools: GroupBuyPool[] = pools.map((pool) => {
@@ -180,32 +231,15 @@ export default function App() {
       const updatedItems = pool.items.map((item) => {
         if (item.id !== itemId) return item;
 
-        const existingClaim = item.claims.find(
-          (c) => c.userId === activeUser.id
+        const { updatedClaims, result } = evaluateAtomicClaimTransition(
+          item,
+          activeUser,
+          delta
         );
-        let newClaims = [...item.claims];
+        atomicResult = result;
+        nextQuantityForSync = result.newUserQuantity;
 
-        if (existingClaim) {
-          const nextQty = Math.max(0, existingClaim.quantity + delta);
-          nextQuantityForSync = nextQty;
-          if (nextQty === 0) {
-            newClaims = newClaims.filter((c) => c.userId !== activeUser.id);
-          } else {
-            newClaims = newClaims.map((c) =>
-              c.userId === activeUser.id ? { ...c, quantity: nextQty } : c
-            );
-          }
-        } else if (delta > 0) {
-          nextQuantityForSync = delta;
-          newClaims.push({
-            userId: activeUser.id,
-            userName: activeUser.name,
-            avatarColor: activeUser.avatarColor,
-            quantity: delta,
-          });
-        }
-
-        return { ...item, claims: newClaims };
+        return { ...item, claims: updatedClaims };
       });
 
       return {
@@ -218,11 +252,28 @@ export default function App() {
     setPools(updatedPools);
     await PoolRepository.saveLocalPools(updatedPools);
 
+    const nextPoolSnapshot =
+      updatedPools.find((p) => p.id === activePool.id) || activePool;
+
+    if (atomicResult) {
+      const triggered = NotificationService.evaluateClaimMilestones(
+        prevPoolSnapshot,
+        nextPoolSnapshot,
+        targetItem,
+        atomicResult,
+        notifPrefs
+      );
+      if (triggered.length > 0) {
+        await pushAlerts(triggered);
+      }
+    }
+
     if (PoolRepository.getCurrentConfig().enabled) {
-      const { error } = await PoolRepository.syncClaimQuantity(
+      const { error } = await PoolRepository.syncAtomicClaimDelta(
         activePool.id,
         itemId,
         activeUser,
+        delta,
         nextQuantityForSync
       );
       if (error) {
@@ -265,15 +316,63 @@ export default function App() {
     setPools(updatedPools);
     await PoolRepository.saveLocalPools(updatedPools);
 
+    if (isAnnouncement && notifPrefs.porchDropArrival) {
+      const alert = NotificationService.createAlert(
+        activePool,
+        'porch_pickup_ready',
+        `📢 Host Announcement (${activePool.joinCode})`,
+        text
+      );
+      await pushAlerts([alert]);
+    }
+
     if (PoolRepository.getCurrentConfig().enabled) {
       await PoolRepository.syncNewMessage(newMsg);
     }
   };
 
-  /**
-   * 1-Tap Rerun Weekly Pool: Clones the current pool's wholesale catalog items with fresh 0 claims
-   * and generates a new invite code for next week's run.
-   */
+  const handleTriggerCutoffReminder = async () => {
+    const summary = getPoolProgressSummary(activePool);
+    const openCases = activePool.items
+      .map((i) => ({ item: i, status: getCaseSplitStatus(i) }))
+      .filter((x) => x.item.mode === 'case_split' && x.status.neededForNextCase > 0);
+
+    const caseDetail =
+      openCases.length > 0
+        ? ` ${openCases[0].item.emoji} ${openCases[0].item.name} only needs ${openCases[0].status.neededForNextCase} more share(s) to lock the case!`
+        : '';
+
+    const alert = NotificationService.createAlert(
+      activePool,
+      'cutoff_reminder',
+      `⏰ 2 Hours Until Cutoff (${activePool.cutoffTime})`,
+      `Pool is at $${summary.combinedPoolTotal.toFixed(2)} / $${activePool.minimumOrderAmount} min.${caseDetail}`
+    );
+    await pushAlerts([alert]);
+  };
+
+  const handleTriggerPorchReadyAlert = async () => {
+    const alert = NotificationService.createAlert(
+      activePool,
+      'porch_pickup_ready',
+      `🛍️ Porch Pickup Ready: ${activePool.title}!`,
+      `Wholesale order has been sorted at ${activePool.pickupAddress}. Pickup window: ${activePool.pickupWindow}.`
+    );
+    await pushAlerts([alert]);
+  };
+
+  const handleToggleNotifPref = async (key: keyof NotificationPreferences) => {
+    const updated = { ...notifPrefs, [key]: !notifPrefs[key] };
+    setNotifPrefs(updated);
+    await NotificationService.savePreferences(updated);
+  };
+
+  const handleMarkAllAlertsRead = async () => {
+    const updated = alerts.map((a) => ({ ...a, read: true }));
+    setAlerts(updated);
+    await NotificationService.saveAlerts(updated);
+  };
+
   const handleRerunWeeklyPool = async () => {
     const nowTs = Date.now();
     const prefix = activePool.joinCode.split('-')[0] || 'POOL';
@@ -358,33 +457,25 @@ export default function App() {
   ) => {
     const hostParticipant =
       activePool.participants.find((p) => p.isHost) || activeUser;
+    const targetItem = activePool.items.find((i) => i.id === itemId);
+    const prevPoolSnapshot = activePool;
 
     let syncedQty = neededQty;
+    let atomicResult: AtomicClaimResult | null = null;
 
     const updatedPools: GroupBuyPool[] = pools.map((pool) => {
       if (pool.id !== activePool.id) return pool;
 
       const updatedItems = pool.items.map((item) => {
         if (item.id !== itemId) return item;
-        const existing = item.claims.find(
-          (c) => c.userId === hostParticipant.id
+        const { updatedClaims, result } = evaluateAtomicClaimTransition(
+          item,
+          hostParticipant,
+          neededQty
         );
-        let newClaims = [...item.claims];
-        if (existing) {
-          syncedQty = existing.quantity + neededQty;
-          newClaims = newClaims.map((c) =>
-            c.userId === hostParticipant.id ? { ...c, quantity: syncedQty } : c
-          );
-        } else {
-          syncedQty = neededQty;
-          newClaims.push({
-            userId: hostParticipant.id,
-            userName: hostParticipant.name,
-            avatarColor: hostParticipant.avatarColor,
-            quantity: neededQty,
-          });
-        }
-        return { ...item, claims: newClaims };
+        atomicResult = result;
+        syncedQty = result.newUserQuantity;
+        return { ...item, claims: updatedClaims };
       });
 
       return { ...pool, items: updatedItems };
@@ -393,11 +484,27 @@ export default function App() {
     setPools(updatedPools);
     await PoolRepository.saveLocalPools(updatedPools);
 
+    const nextPoolSnapshot =
+      updatedPools.find((p) => p.id === activePool.id) || activePool;
+    if (atomicResult && targetItem) {
+      const triggered = NotificationService.evaluateClaimMilestones(
+        prevPoolSnapshot,
+        nextPoolSnapshot,
+        targetItem,
+        atomicResult,
+        notifPrefs
+      );
+      if (triggered.length > 0) {
+        await pushAlerts(triggered);
+      }
+    }
+
     if (PoolRepository.getCurrentConfig().enabled) {
-      await PoolRepository.syncClaimQuantity(
+      await PoolRepository.syncAtomicClaimDelta(
         activePool.id,
         itemId,
         hostParticipant,
+        neededQty,
         syncedQty
       );
     }
@@ -462,7 +569,9 @@ export default function App() {
       activePool.items[0];
     if (!targetItem) return;
 
+    const prevPoolSnapshot = activePool;
     let simulatedNextQty = 1;
+    let atomicResult: AtomicClaimResult | null = null;
 
     const updatedPools: GroupBuyPool[] = pools.map((pool) => {
       if (pool.id !== activePool.id) return pool;
@@ -476,27 +585,14 @@ export default function App() {
 
       const updatedItems = pool.items.map((item) => {
         if (item.id !== targetItem.id) return item;
-        const existing = item.claims.find(
-          (c) => c.userId === randomNeighbor.id
+        const { updatedClaims, result } = evaluateAtomicClaimTransition(
+          item,
+          randomNeighbor,
+          1
         );
-        let newClaims = [...item.claims];
-        if (existing) {
-          simulatedNextQty = existing.quantity + 1;
-          newClaims = newClaims.map((c) =>
-            c.userId === randomNeighbor.id
-              ? { ...c, quantity: simulatedNextQty }
-              : c
-          );
-        } else {
-          simulatedNextQty = 1;
-          newClaims.push({
-            userId: randomNeighbor.id,
-            userName: randomNeighbor.name,
-            avatarColor: randomNeighbor.avatarColor,
-            quantity: 1,
-          });
-        }
-        return { ...item, claims: newClaims };
+        atomicResult = result;
+        simulatedNextQty = result.newUserQuantity;
+        return { ...item, claims: updatedClaims };
       });
 
       return {
@@ -509,11 +605,27 @@ export default function App() {
     setPools(updatedPools);
     await PoolRepository.saveLocalPools(updatedPools);
 
+    const nextPoolSnapshot =
+      updatedPools.find((p) => p.id === activePool.id) || activePool;
+    if (atomicResult) {
+      const triggered = NotificationService.evaluateClaimMilestones(
+        prevPoolSnapshot,
+        nextPoolSnapshot,
+        targetItem,
+        atomicResult,
+        notifPrefs
+      );
+      if (triggered.length > 0) {
+        await pushAlerts(triggered);
+      }
+    }
+
     if (PoolRepository.getCurrentConfig().enabled) {
-      await PoolRepository.syncClaimQuantity(
+      await PoolRepository.syncAtomicClaimDelta(
         activePool.id,
         targetItem.id,
         randomNeighbor,
+        1,
         simulatedNextQty
       );
     }
@@ -616,6 +728,7 @@ export default function App() {
   );
   const summary = getPoolProgressSummary(activePool);
   const messageCount = (activePool.messages || []).length;
+  const unreadAlertsCount = alerts.filter((a) => !a.read).length;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -664,6 +777,15 @@ export default function App() {
 
         <View style={styles.headerActions}>
           <TouchableOpacity
+            style={styles.bellButton}
+            onPress={() => setShowNotificationModal(true)}
+          >
+            <Text style={styles.bellButtonText}>
+              🔔{unreadAlertsCount > 0 ? ` ${unreadAlertsCount}` : ''}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
             style={styles.codeJoinButton}
             onPress={() => setShowJoinByCodeModal(true)}
           >
@@ -674,7 +796,7 @@ export default function App() {
             style={styles.sharePoolButton}
             onPress={handleSharePoolInvite}
           >
-            <Text style={styles.sharePoolButtonText}>📤 Invite</Text>
+            <Text style={styles.sharePoolButtonText}>📤</Text>
           </TouchableOpacity>
 
           <TouchableOpacity
@@ -685,6 +807,16 @@ export default function App() {
           </TouchableOpacity>
         </View>
       </View>
+
+      {/* Live Milestone Toast Banner */}
+      <LiveToastBanner
+        alert={liveToast}
+        onDismiss={() => setLiveToast(null)}
+        onPressBanner={() => {
+          setLiveToast(null);
+          setShowNotificationModal(true);
+        }}
+      />
 
       {/* Horizontal Pool Selector */}
       <View style={styles.poolSelectorWrap}>
@@ -996,6 +1128,18 @@ export default function App() {
           setActiveTab('catalog');
         }}
       />
+
+      <NotificationCenterModal
+        visible={showNotificationModal}
+        pool={activePool}
+        alerts={alerts}
+        prefs={notifPrefs}
+        onClose={() => setShowNotificationModal(false)}
+        onTogglePref={handleToggleNotifPref}
+        onTriggerCutoffReminder={handleTriggerCutoffReminder}
+        onTriggerPorchReadyAlert={handleTriggerPorchReadyAlert}
+        onMarkAllRead={handleMarkAllAlertsRead}
+      />
     </SafeAreaView>
   );
 }
@@ -1064,11 +1208,24 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 5,
   },
+  bellButton: {
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1,
+    borderColor: '#FCD34D',
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+    borderRadius: 9,
+  },
+  bellButtonText: {
+    color: '#92400E',
+    fontWeight: '800',
+    fontSize: 11,
+  },
   codeJoinButton: {
     backgroundColor: '#F1F5F9',
     borderWidth: 1,
     borderColor: '#CBD5E1',
-    paddingHorizontal: 9,
+    paddingHorizontal: 8,
     paddingVertical: 7,
     borderRadius: 9,
   },
@@ -1081,7 +1238,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#F0FDFA',
     borderWidth: 1,
     borderColor: '#5EEAD4',
-    paddingHorizontal: 9,
+    paddingHorizontal: 8,
     paddingVertical: 7,
     borderRadius: 9,
   },

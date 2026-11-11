@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import { CURRENT_USER, INITIAL_POOLS } from '../data/mockPools';
 import {
+  AtomicClaimResult,
   CatalogItem,
   GroupBuyPool,
   Participant,
@@ -81,6 +82,99 @@ function getOrCreateSupabaseClient(): SupabaseClient | null {
   return activeClient;
 }
 
+/**
+ * Local in-memory / AsyncStorage equivalent of the Postgres `claim_item_share` RPC:
+ * Enforces `maxCases` cap, computes whether a case just locked (`justCompletedCase`)
+ * or rolled over into a new case (`justOpenedNewCase`).
+ */
+export function evaluateAtomicClaimTransition(
+  item: CatalogItem,
+  user: Participant,
+  delta: number
+): {
+  updatedClaims: ParticipantShare[];
+  result: AtomicClaimResult;
+} {
+  const existingUserClaim = item.claims.find((c) => c.userId === user.id);
+  const currentUserQty = existingUserClaim ? existingUserClaim.quantity : 0;
+  const otherUsersQty = item.claims
+    .filter((c) => c.userId !== user.id)
+    .reduce((sum, c) => sum + c.quantity, 0);
+
+  const prevTotal = currentUserQty + otherUsersQty;
+  let nextUserQty = Math.max(0, currentUserQty + delta);
+  let nextTotal = otherUsersQty + nextUserQty;
+  let cappedAtMaxCases = false;
+
+  const caseSize = item.mode === 'case_split' && item.caseSize ? item.caseSize : 1;
+
+  if (
+    item.mode === 'case_split' &&
+    item.maxCases &&
+    item.maxCases > 0
+  ) {
+    const maxAllowedUnits = item.maxCases * caseSize;
+    if (nextTotal > maxAllowedUnits) {
+      nextUserQty = Math.max(0, maxAllowedUnits - otherUsersQty);
+      nextTotal = otherUsersQty + nextUserQty;
+      cappedAtMaxCases = true;
+    }
+  }
+
+  let updatedClaims = [...item.claims];
+  if (nextUserQty <= 0) {
+    updatedClaims = updatedClaims.filter((c) => c.userId !== user.id);
+  } else if (existingUserClaim) {
+    updatedClaims = updatedClaims.map((c) =>
+      c.userId === user.id ? { ...c, quantity: nextUserQty } : c
+    );
+  } else {
+    updatedClaims.push({
+      userId: user.id,
+      userName: user.name,
+      avatarColor: user.avatarColor,
+      quantity: nextUserQty,
+    });
+  }
+
+  const prevFullCases =
+    item.mode === 'case_split' && caseSize > 1
+      ? Math.floor(prevTotal / caseSize)
+      : prevTotal;
+  const nextFullCases =
+    item.mode === 'case_split' && caseSize > 1
+      ? Math.floor(nextTotal / caseSize)
+      : nextTotal;
+  const remainderUnits =
+    item.mode === 'case_split' && caseSize > 1 ? nextTotal % caseSize : 0;
+
+  const justCompletedCase =
+    item.mode === 'case_split' &&
+    caseSize > 1 &&
+    nextFullCases > prevFullCases &&
+    remainderUnits === 0;
+
+  const justOpenedNewCase =
+    item.mode === 'case_split' &&
+    caseSize > 1 &&
+    prevTotal > 0 &&
+    prevTotal % caseSize === 0 &&
+    nextTotal > prevTotal;
+
+  return {
+    updatedClaims,
+    result: {
+      newUserQuantity: nextUserQty,
+      totalClaimedUnits: nextTotal,
+      fullCasesCount: nextFullCases,
+      remainderUnits,
+      justCompletedCase,
+      justOpenedNewCase,
+      cappedAtMaxCases,
+    },
+  };
+}
+
 export const PoolRepository = {
   async initConfig(): Promise<SupabaseConfig> {
     try {
@@ -136,11 +230,6 @@ export const PoolRepository = {
     }
   },
 
-  /**
-   * Fetches all pools. If Supabase is configured & enabled, fetches relational rows
-   * from `pools`, `pool_participants`, `catalog_items`, `item_claims`, and `pool_messages`.
-   * If tables are empty on first connect, automatically seeds `INITIAL_POOLS`.
-   */
   async loadPools(): Promise<{ pools: GroupBuyPool[]; error?: string }> {
     const client = getOrCreateSupabaseClient();
     if (client) {
@@ -199,6 +288,7 @@ export const PoolRepository = {
                 unitPrice: Number(i.unit_price),
                 retailPrice: Number(i.retail_price),
                 caseSize: i.case_size ? Number(i.case_size) : undefined,
+                maxCases: i.max_cases ? Number(i.max_cases) : undefined,
                 claims: itemClaims,
               };
             });
@@ -323,6 +413,7 @@ export const PoolRepository = {
           unit_price: item.unitPrice,
           retail_price: item.retailPrice,
           case_size: item.caseSize ?? null,
+          max_cases: item.maxCases ?? null,
         }))
       );
 
@@ -378,6 +469,43 @@ export const PoolRepository = {
       return {};
     } catch (err: any) {
       return { error: err?.message || 'Failed to seed Supabase database' };
+    }
+  },
+
+  /**
+   * Calls the PostgreSQL `claim_item_share` RPC (`FOR UPDATE` row-level lock) when
+   * connected to Supabase, falling back to direct table upsert if the user hasn't run
+   * the updated SQL function yet.
+   */
+  async syncAtomicClaimDelta(
+    poolId: string,
+    itemId: string,
+    user: Participant,
+    delta: number,
+    fallbackQuantity: number
+  ): Promise<{ rpcResult?: AtomicClaimResult; error?: string }> {
+    const client = getOrCreateSupabaseClient();
+    if (!client) return {};
+
+    try {
+      const { data, error } = await client.rpc('claim_item_share', {
+        p_pool_id: poolId,
+        p_item_id: itemId,
+        p_user_id: user.id,
+        p_user_name: user.name,
+        p_avatar_color: user.avatarColor,
+        p_neighborhood: user.neighborhood,
+        p_delta: delta,
+      });
+
+      if (!error && data) {
+        return { rpcResult: data as AtomicClaimResult };
+      }
+
+      // Fallback to standard upsert if RPC isn't created yet
+      return await this.syncClaimQuantity(poolId, itemId, user, fallbackQuantity);
+    } catch (err: any) {
+      return { error: err?.message || 'Atomic claim RPC failed' };
     }
   },
 
@@ -451,6 +579,7 @@ export const PoolRepository = {
         unit_price: item.unitPrice,
         retail_price: item.retailPrice,
         case_size: item.caseSize ?? null,
+        max_cases: item.maxCases ?? null,
       });
       if (itemErr) throw itemErr;
 

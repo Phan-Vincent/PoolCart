@@ -1,0 +1,16 @@
+{
+  "task_id": "task-db7cf682a931",
+  "worker": "school_chatgpt",
+  "handoff_provenance": "manual_handoff",
+  "transport": "supervisor-operated authenticated browser, native file picker",
+  "workspace": "California State University, San Bernardino EDU",
+  "model": "GPT-6 Astra",
+  "reasoning_effort": "High",
+  "mode": "Work",
+  "submission_status": "submitted",
+  "completion_status": "running",
+  "source_upload_approved": true,
+  "source_snapshot": "source-snapshot.txt",
+  "typecheck": "passed before submission",
+  "upload_recovery": "initial approval review rejected upload; user explicitly approved source upload; extension upload failed due file access, native picker succeeded"
+}

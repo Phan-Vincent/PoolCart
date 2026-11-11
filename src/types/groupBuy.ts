@@ -18,6 +18,7 @@ export interface CatalogItem {
   unitPrice: number; // Price per unit/share
   retailPrice: number; // Typical store retail price per unit for savings comparison
   caseSize?: number; // For case_split items: how many units make 1 full wholesale case (e.g., 6)
+  maxCases?: number; // Optional cap on how many full cases can be opened (prevents accidental overflow)
   claims: ParticipantShare[];
 }
 
@@ -43,6 +44,43 @@ export interface PoolMessage {
   isAnnouncement?: boolean;
   text: string;
   createdAt: string;
+}
+
+export type AlertCategory =
+  | 'case_locked'
+  | 'minimum_met'
+  | 'free_delivery_near'
+  | 'free_delivery_unlocked'
+  | 'cutoff_reminder'
+  | 'porch_pickup_ready';
+
+export interface PoolNotificationAlert {
+  id: string;
+  poolId: string;
+  poolTitle: string;
+  category: AlertCategory;
+  title: string;
+  body: string;
+  createdAt: string;
+  read: boolean;
+}
+
+export interface NotificationPreferences {
+  cutoffReminder2h: boolean;
+  freeDeliveryProximity: boolean;
+  caseSplitCompletion: boolean;
+  porchDropArrival: boolean;
+}
+
+export interface AtomicClaimResult {
+  newUserQuantity: number;
+  totalClaimedUnits: number;
+  fullCasesCount: number;
+  remainderUnits: number;
+  justCompletedCase: boolean;
+  justOpenedNewCase: boolean;
+  cappedAtMaxCases: boolean;
+  message?: string;
 }
 
 export interface SupplierCatalogTemplate {

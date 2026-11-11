@@ -23,15 +23,27 @@ export const CatalogItemCard: React.FC<Props> = ({
     ((item.retailPrice - item.unitPrice) / item.retailPrice) * 100
   );
 
+  const isMaxCasesCapped =
+    item.mode === 'case_split' &&
+    Boolean(
+      item.maxCases &&
+        item.caseSize &&
+        caseStatus.totalClaimedUnits >= item.maxCases * item.caseSize
+    );
+
   // Build slot indicators for case_split mode
   const renderCaseSlots = () => {
     if (item.mode !== 'case_split' || !item.caseSize) return null;
 
-    // Show current active case slots (or completed case if exact multiple)
     const slotsInCurrentView =
       caseStatus.remainderUnits === 0 && caseStatus.totalClaimedUnits > 0
         ? item.caseSize
         : caseStatus.remainderUnits;
+
+    const activeCaseNumber =
+      caseStatus.remainderUnits === 0 && caseStatus.fullCasesCount > 0
+        ? caseStatus.fullCasesCount
+        : caseStatus.fullCasesCount + 1;
 
     const slots = Array.from({ length: item.caseSize }, (_, idx) => {
       const filled = idx < slotsInCurrentView;
@@ -50,7 +62,8 @@ export const CatalogItemCard: React.FC<Props> = ({
       <View style={styles.caseSplitContainer}>
         <View style={styles.caseHeaderRow}>
           <Text style={styles.caseTitle}>
-            📦 Bulk Case Split ({item.caseSize} units/case)
+            📦 Case #{activeCaseNumber} ({item.caseSize} units/case
+            {item.maxCases ? ` • Max ${item.maxCases} cases` : ''})
           </Text>
           <Text
             style={[
@@ -60,11 +73,15 @@ export const CatalogItemCard: React.FC<Props> = ({
                 : styles.casePendingText,
             ]}
           >
-            {caseStatus.totalClaimedUnits === 0
+            {isMaxCasesCapped
+              ? `🔒 All ${item.maxCases} case(s) full!`
+              : caseStatus.totalClaimedUnits === 0
               ? `0/${item.caseSize} claimed`
               : caseStatus.neededForNextCase === 0
-              ? `✓ ${caseStatus.fullCasesCount} full case(s) locked!`
-              : `${caseStatus.neededForNextCase} more needed to fill case`}
+              ? `✓ ${caseStatus.fullCasesCount} full case(s) locked! (+ opens Case #${
+                  caseStatus.fullCasesCount + 1
+                })`
+              : `${caseStatus.neededForNextCase} more needed for Case #${activeCaseNumber}`}
           </Text>
         </View>
         <View style={styles.slotsRow}>{slots}</View>
@@ -95,7 +112,7 @@ export const CatalogItemCard: React.FC<Props> = ({
                     : styles.badgeIndivText,
                 ]}
               >
-                {item.mode === 'case_split' ? 'SPLIT CASE' : 'DIRECT WHOLESALE'}
+                {item.mode === 'case_split' ? 'ATOMIC CASE SPLIT' : 'DIRECT WHOLESALE'}
               </Text>
             </View>
             {savingsPct > 0 && (
@@ -124,12 +141,20 @@ export const CatalogItemCard: React.FC<Props> = ({
             </View>
           ) : myQty === 0 ? (
             <TouchableOpacity
-              style={styles.joinButton}
+              style={[
+                styles.joinButton,
+                isMaxCasesCapped && styles.joinButtonDisabled,
+              ]}
               onPress={() => onUpdateQuantity(item.id, 1)}
+              disabled={isMaxCasesCapped}
               activeOpacity={0.8}
             >
               <Text style={styles.joinButtonText}>
-                {item.mode === 'case_split' ? '+ Claim Share' : '+ Add'}
+                {isMaxCasesCapped
+                  ? 'Case Cap Full'
+                  : item.mode === 'case_split'
+                  ? '+ Claim Share'
+                  : '+ Add'}
               </Text>
             </TouchableOpacity>
           ) : (
@@ -142,8 +167,12 @@ export const CatalogItemCard: React.FC<Props> = ({
               </TouchableOpacity>
               <Text style={styles.qtyText}>{myQty}</Text>
               <TouchableOpacity
-                style={styles.stepBtn}
+                style={[
+                  styles.stepBtn,
+                  isMaxCasesCapped && styles.stepBtnDisabled,
+                ]}
                 onPress={() => onUpdateQuantity(item.id, 1)}
+                disabled={isMaxCasesCapped}
               >
                 <Text style={styles.stepBtnText}>+</Text>
               </TouchableOpacity>
@@ -294,6 +323,9 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 10,
   },
+  joinButtonDisabled: {
+    backgroundColor: '#94A3B8',
+  },
   joinButtonText: {
     color: '#FFFFFF',
     fontWeight: '700',
@@ -331,6 +363,10 @@ const styles = StyleSheet.create({
     shadowRadius: 2,
     elevation: 1,
   },
+  stepBtnDisabled: {
+    backgroundColor: '#E2E8F0',
+    opacity: 0.5,
+  },
   stepBtnText: {
     fontSize: 16,
     fontWeight: '800',
@@ -361,6 +397,8 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 6,
+    flexWrap: 'wrap',
+    gap: 4,
   },
   caseTitle: {
     fontSize: 11,

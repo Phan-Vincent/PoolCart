@@ -39,12 +39,14 @@ export const AddItemModal: React.FC<AddItemModalProps> = ({
   const [retailPrice, setRetailPrice] = useState('12.99');
   const [mode, setMode] = useState<ItemMode>('case_split');
   const [caseSize, setCaseSize] = useState('6');
+  const [maxCases, setMaxCases] = useState('');
 
   const handleSave = () => {
     if (!name.trim()) return;
     const parsedUnit = parseFloat(unitPrice) || 5;
     const parsedRetail = parseFloat(retailPrice) || parsedUnit * 1.35;
     const parsedCase = parseInt(caseSize, 10) || 4;
+    const parsedMaxCases = parseInt(maxCases, 10);
 
     const item: CatalogItem = {
       id: `item_${Date.now()}`,
@@ -56,6 +58,10 @@ export const AddItemModal: React.FC<AddItemModalProps> = ({
       unitPrice: parsedUnit,
       retailPrice: parsedRetail,
       caseSize: mode === 'case_split' ? parsedCase : undefined,
+      maxCases:
+        mode === 'case_split' && !isNaN(parsedMaxCases) && parsedMaxCases > 0
+          ? parsedMaxCases
+          : undefined,
       claims: [
         {
           userId: activeUser.id,
@@ -68,6 +74,7 @@ export const AddItemModal: React.FC<AddItemModalProps> = ({
 
     onAddItem(item);
     setName('');
+    setMaxCases('');
     onClose();
   };
 
@@ -169,16 +176,26 @@ export const AddItemModal: React.FC<AddItemModalProps> = ({
             </View>
 
             {mode === 'case_split' && (
-              <View>
-                <Text style={styles.label}>
-                  Shares Needed to Complete 1 Wholesale Case
-                </Text>
-                <TextInput
-                  style={styles.input}
-                  keyboardType="number-pad"
-                  value={caseSize}
-                  onChangeText={setCaseSize}
-                />
+              <View style={styles.row}>
+                <View style={{ flex: 1, marginRight: 8 }}>
+                  <Text style={styles.label}>Shares per Case</Text>
+                  <TextInput
+                    style={styles.input}
+                    keyboardType="number-pad"
+                    value={caseSize}
+                    onChangeText={setCaseSize}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.label}>Max Cases Cap (Optional)</Text>
+                  <TextInput
+                    style={styles.input}
+                    keyboardType="number-pad"
+                    placeholder="Unlimited"
+                    value={maxCases}
+                    onChangeText={setMaxCases}
+                  />
+                </View>
               </View>
             )}
           </ScrollView>
