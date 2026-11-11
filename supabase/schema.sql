@@ -7,11 +7,13 @@
 -- 1. Pools Table
 create table if not exists public.pools (
   id text primary key,
+  join_code text not null default 'POOL-01',
   title text not null,
   supplier_name text not null,
   supplier_badge text not null,
   category text not null,
   host_name text not null,
+  host_venmo_handle text,
   neighborhood text not null,
   pickup_address text not null,
   pickup_window text not null,
@@ -32,6 +34,7 @@ create table if not exists public.pool_participants (
   avatar_color text not null default '#0D9488',
   is_host boolean not null default false,
   paid_status text not null default 'pending' check (paid_status in ('pending', 'paid')),
+  picked_up boolean not null default false,
   updated_at timestamptz not null default now(),
   primary key (pool_id, user_id)
 );
@@ -63,11 +66,26 @@ create table if not exists public.item_claims (
   primary key (item_id, user_id)
 );
 
--- 5. Enable Row Level Security (Open for MVP prototyping so neighbors can read/write)
+-- 5. Pool Messages & Host Announcements Table
+create table if not exists public.pool_messages (
+  id text primary key,
+  pool_id text not null references public.pools(id) on delete cascade,
+  user_id text not null,
+  user_name text not null,
+  avatar_color text not null default '#0D9488',
+  is_host boolean not null default false,
+  is_announcement boolean not null default false,
+  text text not null,
+  created_at_label text not null,
+  created_at timestamptz not null default now()
+);
+
+-- 6. Enable Row Level Security (Open for MVP prototyping so neighbors can read/write)
 alter table public.pools enable row level security;
 alter table public.pool_participants enable row level security;
 alter table public.catalog_items enable row level security;
 alter table public.item_claims enable row level security;
+alter table public.pool_messages enable row level security;
 
 drop policy if exists "Allow public read/write on pools" on public.pools;
 create policy "Allow public read/write on pools" on public.pools for all using (true) with check (true);
@@ -81,7 +99,10 @@ create policy "Allow public read/write on catalog_items" on public.catalog_items
 drop policy if exists "Allow public read/write on item_claims" on public.item_claims;
 create policy "Allow public read/write on item_claims" on public.item_claims for all using (true) with check (true);
 
--- 6. Enable Supabase Realtime on all 4 tables
+drop policy if exists "Allow public read/write on pool_messages" on public.pool_messages;
+create policy "Allow public read/write on pool_messages" on public.pool_messages for all using (true) with check (true);
+
+-- 7. Enable Supabase Realtime on all 5 tables
 do $$
 begin
   if not exists (
@@ -110,5 +131,12 @@ begin
     where pubname = 'supabase_realtime' and tablename = 'item_claims'
   ) then
     alter publication supabase_realtime add table public.item_claims;
+  end if;
+
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and tablename = 'pool_messages'
+  ) then
+    alter publication supabase_realtime add table public.pool_messages;
   end if;
 end $$;

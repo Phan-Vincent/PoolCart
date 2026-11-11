@@ -33,8 +33,34 @@ export interface Participant {
 
 export type PoolStatus = 'open' | 'minimum_met' | 'locked';
 
+export interface PoolMessage {
+  id: string;
+  poolId: string;
+  userId: string;
+  userName: string;
+  avatarColor: string;
+  isHost?: boolean;
+  isAnnouncement?: boolean;
+  text: string;
+  createdAt: string;
+}
+
+export interface SupplierCatalogTemplate {
+  id: string;
+  name: string;
+  supplierName: string;
+  supplierBadge: string;
+  category: string;
+  emoji: string;
+  defaultMinimumOrder: number;
+  defaultDeliveryFee: number;
+  defaultFreeThreshold: number;
+  items: Omit<CatalogItem, 'id' | 'claims'>[];
+}
+
 export interface GroupBuyPool {
   id: string;
+  joinCode: string; // e.g. "VG-FARM" or "WEEE-88"
   title: string;
   supplierName: string;
   supplierBadge: string;
@@ -51,6 +77,7 @@ export interface GroupBuyPool {
   status: PoolStatus;
   participants: Participant[];
   items: CatalogItem[];
+  messages: PoolMessage[];
 }
 
 export interface UserCostBreakdown {

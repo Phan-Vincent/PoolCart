@@ -1,11 +1,17 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import { CURRENT_USER, INITIAL_POOLS } from '../data/mockPools';
-import { CatalogItem, GroupBuyPool, Participant, ParticipantShare } from '../types/groupBuy';
+import {
+  CatalogItem,
+  GroupBuyPool,
+  Participant,
+  ParticipantShare,
+  PoolMessage,
+} from '../types/groupBuy';
 
 declare const process: { env: Record<string, string | undefined> };
 
-const STORAGE_KEY_POOLS = '@poolcart_pools_v2';
+const STORAGE_KEY_POOLS = '@poolcart_pools_v3';
 const STORAGE_KEY_SUPABASE_CONFIG = '@poolcart_supabase_config_v1';
 const STORAGE_KEY_ACTIVE_USER = '@poolcart_active_user_v1';
 
@@ -76,9 +82,6 @@ function getOrCreateSupabaseClient(): SupabaseClient | null {
 }
 
 export const PoolRepository = {
-  /**
-   * Loads saved Supabase credentials from AsyncStorage (or falls back to .env)
-   */
   async initConfig(): Promise<SupabaseConfig> {
     try {
       const saved = await AsyncStorage.getItem(STORAGE_KEY_SUPABASE_CONFIG);
@@ -135,18 +138,19 @@ export const PoolRepository = {
 
   /**
    * Fetches all pools. If Supabase is configured & enabled, fetches relational rows
-   * from `pools`, `pool_participants`, `catalog_items`, and `item_claims`.
+   * from `pools`, `pool_participants`, `catalog_items`, `item_claims`, and `pool_messages`.
    * If tables are empty on first connect, automatically seeds `INITIAL_POOLS`.
    */
   async loadPools(): Promise<{ pools: GroupBuyPool[]; error?: string }> {
     const client = getOrCreateSupabaseClient();
     if (client) {
       try {
-        const [poolsRes, partsRes, itemsRes, claimsRes] = await Promise.all([
+        const [poolsRes, partsRes, itemsRes, claimsRes, msgsRes] = await Promise.all([
           client.from('pools').select('*').order('created_at', { ascending: true }),
           client.from('pool_participants').select('*'),
           client.from('catalog_items').select('*').order('created_at', { ascending: true }),
           client.from('item_claims').select('*'),
+          client.from('pool_messages').select('*').order('created_at', { ascending: true }),
         ]);
 
         if (poolsRes.error) throw poolsRes.error;
@@ -154,7 +158,6 @@ export const PoolRepository = {
         if (itemsRes.error) throw itemsRes.error;
         if (claimsRes.error) throw claimsRes.error;
 
-        // If the Supabase database has 0 pools, seed it with INITIAL_POOLS automatically
         if (!poolsRes.data || poolsRes.data.length === 0) {
           await this.seedSupabasePools(INITIAL_POOLS);
           await AsyncStorage.setItem(STORAGE_KEY_POOLS, JSON.stringify(INITIAL_POOLS));
@@ -171,6 +174,7 @@ export const PoolRepository = {
               avatarColor: p.avatar_color || '#0D9488',
               isHost: Boolean(p.is_host),
               paidStatus: (p.paid_status === 'paid' ? 'paid' : 'pending') as 'pending' | 'paid',
+              pickedUp: Boolean(p.picked_up),
             }));
 
           const poolItems: CatalogItem[] = (itemsRes.data || [])
@@ -199,13 +203,29 @@ export const PoolRepository = {
               };
             });
 
+          const poolMessages: PoolMessage[] = (msgsRes.data || [])
+            .filter((m: any) => m.pool_id === row.id)
+            .map((m: any) => ({
+              id: m.id,
+              poolId: m.pool_id,
+              userId: m.user_id,
+              userName: m.user_name,
+              avatarColor: m.avatar_color || '#0D9488',
+              isHost: Boolean(m.is_host),
+              isAnnouncement: Boolean(m.is_announcement),
+              text: m.text,
+              createdAt: m.created_at_label || 'Just now',
+            }));
+
           return {
             id: row.id,
+            joinCode: row.join_code || 'POOL-01',
             title: row.title,
             supplierName: row.supplier_name,
             supplierBadge: row.supplier_badge,
             category: row.category,
             hostName: row.host_name,
+            hostVenmoHandle: row.host_venmo_handle || 'PoolCart-Host',
             neighborhood: row.neighborhood,
             pickupAddress: row.pickup_address,
             pickupWindow: row.pickup_window,
@@ -216,6 +236,7 @@ export const PoolRepository = {
             status: row.status || 'open',
             participants: poolParticipants,
             items: poolItems,
+            messages: poolMessages,
           };
         });
 
@@ -253,9 +274,6 @@ export const PoolRepository = {
     }
   },
 
-  /**
-   * Seeds initial pools, participants, items, and claims into Supabase
-   */
   async seedSupabasePools(pools: GroupBuyPool[]): Promise<{ error?: string }> {
     const client = getOrCreateSupabaseClient();
     if (!client) return {};
@@ -263,11 +281,13 @@ export const PoolRepository = {
     try {
       const poolRows = pools.map((p) => ({
         id: p.id,
+        join_code: p.joinCode,
         title: p.title,
         supplier_name: p.supplierName,
         supplier_badge: p.supplierBadge,
         category: p.category,
         host_name: p.hostName,
+        host_venmo_handle: p.hostVenmoHandle ?? null,
         neighborhood: p.neighborhood,
         pickup_address: p.pickupAddress,
         pickup_window: p.pickupWindow,
@@ -287,6 +307,7 @@ export const PoolRepository = {
           avatar_color: part.avatarColor,
           is_host: Boolean(part.isHost),
           paid_status: part.paidStatus,
+          picked_up: Boolean(part.pickedUp),
         }))
       );
 
@@ -318,6 +339,20 @@ export const PoolRepository = {
         )
       );
 
+      const messageRows = pools.flatMap((p) =>
+        (p.messages || []).map((m) => ({
+          id: m.id,
+          pool_id: p.id,
+          user_id: m.userId,
+          user_name: m.userName,
+          avatar_color: m.avatarColor,
+          is_host: Boolean(m.isHost),
+          is_announcement: Boolean(m.isAnnouncement),
+          text: m.text,
+          created_at_label: m.createdAt,
+        }))
+      );
+
       const r1 = await client.from('pools').upsert(poolRows, { onConflict: 'id' });
       if (r1.error) throw r1.error;
 
@@ -329,10 +364,16 @@ export const PoolRepository = {
       const r3 = await client.from('catalog_items').upsert(itemRows, { onConflict: 'id' });
       if (r3.error) throw r3.error;
 
-      const r4 = await client
-        .from('item_claims')
-        .upsert(claimRows, { onConflict: 'item_id,user_id' });
-      if (r4.error) throw r4.error;
+      if (claimRows.length > 0) {
+        const r4 = await client
+          .from('item_claims')
+          .upsert(claimRows, { onConflict: 'item_id,user_id' });
+        if (r4.error) throw r4.error;
+      }
+
+      if (messageRows.length > 0) {
+        await client.from('pool_messages').upsert(messageRows, { onConflict: 'id' });
+      }
 
       return {};
     } catch (err: any) {
@@ -340,9 +381,6 @@ export const PoolRepository = {
     }
   },
 
-  /**
-   * Syncs a single claim update to Supabase (and ensures participant is in pool_participants)
-   */
   async syncClaimQuantity(
     poolId: string,
     itemId: string,
@@ -430,6 +468,29 @@ export const PoolRepository = {
     return this.seedSupabasePools([pool]);
   },
 
+  async syncNewMessage(msg: PoolMessage): Promise<{ error?: string }> {
+    const client = getOrCreateSupabaseClient();
+    if (!client) return {};
+
+    try {
+      const { error } = await client.from('pool_messages').insert({
+        id: msg.id,
+        pool_id: msg.poolId,
+        user_id: msg.userId,
+        user_name: msg.userName,
+        avatar_color: msg.avatarColor,
+        is_host: Boolean(msg.isHost),
+        is_announcement: Boolean(msg.isAnnouncement),
+        text: msg.text,
+        created_at_label: msg.createdAt,
+      });
+      if (error) throw error;
+      return {};
+    } catch (err: any) {
+      return { error: err?.message || 'Failed to sync message' };
+    }
+  },
+
   async syncPaidStatus(
     poolId: string,
     userId: string,
@@ -500,10 +561,6 @@ export const PoolRepository = {
     }
   },
 
-  /**
-   * Subscribes to Supabase Postgres Changes across `pools`, `pool_participants`,
-   * `catalog_items`, and `item_claims` so all connected phones update immediately.
-   */
   subscribeToRealtime(onRemoteChange: (eventTable: string) => void): () => void {
     const client = getOrCreateSupabaseClient();
     if (!client) {
@@ -536,6 +593,11 @@ export const PoolRepository = {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'pools' },
         () => onRemoteChange('pools')
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'pool_messages' },
+        () => onRemoteChange('pool_messages')
       )
       .subscribe();
 

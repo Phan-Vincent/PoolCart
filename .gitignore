@@ -4,4 +4,5 @@ dist/
 web-build/
 .env
 .DS_Store
+.Rhistory
 *.log

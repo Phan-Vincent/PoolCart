@@ -17,6 +17,7 @@ import {
 interface Props {
   pool: GroupBuyPool;
   onToggleLockPool: () => void;
+  onRerunWeeklyPool: () => void;
   onHostCoverRemainder: (itemId: string, neededQty: number) => void;
   onTrimPartialCase: (itemId: string) => void;
   onTogglePaidStatus: (userId: string) => void;
@@ -26,6 +27,7 @@ interface Props {
 export const HostOrderSheetView: React.FC<Props> = ({
   pool,
   onToggleLockPool,
+  onRerunWeeklyPool,
   onHostCoverRemainder,
   onTrimPartialCase,
   onTogglePaidStatus,
@@ -91,6 +93,18 @@ export const HostOrderSheetView: React.FC<Props> = ({
             <Text style={styles.lockButtonText}>
               {isLocked ? '🔓 Reopen Pool' : '🔒 Lock Pool'}
             </Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.rerunRow}>
+          <Text style={styles.rerunHint}>
+            Want to run this exact supplier catalog again next week?
+          </Text>
+          <TouchableOpacity
+            style={styles.rerunBtn}
+            onPress={onRerunWeeklyPool}
+          >
+            <Text style={styles.rerunBtnText}>🔁 Rerun Next Week</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -344,6 +358,35 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '800',
     fontSize: 12,
+  },
+  rerunRow: {
+    marginTop: 12,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(15, 118, 110, 0.15)',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  rerunHint: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#334155',
+    flex: 1,
+    paddingRight: 8,
+  },
+  rerunBtn: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#0D9488',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  rerunBtnText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#0F766E',
   },
   partialAlertCard: {
     backgroundColor: '#FAF5FF',

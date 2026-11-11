@@ -15,6 +15,7 @@ import {
   GroupBuyPool,
   Participant,
   ParticipantShare,
+  PoolMessage,
 } from './src/types/groupBuy';
 import {
   DEMO_PROFILES,
@@ -31,10 +32,15 @@ import { PoolProgressCard } from './src/components/PoolProgressCard';
 import { CatalogItemCard } from './src/components/CatalogItemCard';
 import { SplitLedgerView } from './src/components/SplitLedgerView';
 import { HostOrderSheetView } from './src/components/HostOrderSheetView';
-import { AddItemModal, CreatePoolModal } from './src/components/ActionModals';
+import { PoolChatView } from './src/components/PoolChatView';
+import {
+  AddItemModal,
+  CreatePoolModal,
+  JoinByCodeModal,
+} from './src/components/ActionModals';
 import { SupabaseSetupCard } from './src/components/SupabaseSetupCard';
 
-type ActiveTab = 'catalog' | 'splits' | 'host_sheet' | 'architecture';
+type ActiveTab = 'catalog' | 'splits' | 'chat' | 'host_sheet' | 'architecture';
 type ItemFilter = 'all' | 'individual' | 'case_split';
 
 export default function App() {
@@ -47,6 +53,7 @@ export default function App() {
   const [itemFilter, setItemFilter] = useState<ItemFilter>('all');
   const [showAddItemModal, setShowAddItemModal] = useState(false);
   const [showCreatePoolModal, setShowCreatePoolModal] = useState(false);
+  const [showJoinByCodeModal, setShowJoinByCodeModal] = useState(false);
 
   const [syncStatus, setSyncStatus] = useState<{
     mode: 'local' | 'supabase_live' | 'supabase_error';
@@ -63,7 +70,6 @@ export default function App() {
     return now.toLocaleTimeString([], {
       hour: '2-digit',
       minute: '2-digit',
-      second: '2-digit',
     });
   };
 
@@ -148,7 +154,7 @@ export default function App() {
     try {
       const message = buildShareablePoolInviteText(activePool);
       await Share.share({
-        title: `Join ${activePool.title} on PoolCart`,
+        title: `Join ${activePool.title} (${activePool.joinCode}) on PoolCart`,
         message,
       });
     } catch (err) {
@@ -235,9 +241,101 @@ export default function App() {
     }
   };
 
+  const handleSendMessage = async (text: string, isAnnouncement: boolean) => {
+    const newMsg: PoolMessage = {
+      id: `msg_${Date.now()}`,
+      poolId: activePool.id,
+      userId: activeUser.id,
+      userName: activeUser.name,
+      avatarColor: activeUser.avatarColor,
+      isHost: Boolean(activeUser.isHost),
+      isAnnouncement,
+      text,
+      createdAt: formatTimestamp(),
+    };
+
+    const updatedPools: GroupBuyPool[] = pools.map((pool) => {
+      if (pool.id !== activePool.id) return pool;
+      return {
+        ...pool,
+        messages: [...(pool.messages || []), newMsg],
+      };
+    });
+
+    setPools(updatedPools);
+    await PoolRepository.saveLocalPools(updatedPools);
+
+    if (PoolRepository.getCurrentConfig().enabled) {
+      await PoolRepository.syncNewMessage(newMsg);
+    }
+  };
+
   /**
-   * Host Cutoff Action: Lock or Reopen Pool
+   * 1-Tap Rerun Weekly Pool: Clones the current pool's wholesale catalog items with fresh 0 claims
+   * and generates a new invite code for next week's run.
    */
+  const handleRerunWeeklyPool = async () => {
+    const nowTs = Date.now();
+    const prefix = activePool.joinCode.split('-')[0] || 'POOL';
+    const nextCode = `${prefix}-${Math.floor(10 + Math.random() * 89)}`;
+
+    const clonedItems: CatalogItem[] = activePool.items.map((item, idx) => ({
+      ...item,
+      id: `item_${nowTs}_${idx}`,
+      claims:
+        idx === 0
+          ? [
+              {
+                userId: activeUser.id,
+                userName: activeUser.name,
+                avatarColor: activeUser.avatarColor,
+                quantity: 1,
+              },
+            ]
+          : [],
+    }));
+
+    const rerunPool: GroupBuyPool = {
+      ...activePool,
+      id: `pool_${nowTs}`,
+      joinCode: nextCode,
+      title: `${activePool.title.replace(/ \(Next Week\)$/, '')} (Next Week)`,
+      status: 'open',
+      participants: [
+        {
+          ...activeUser,
+          isHost: true,
+          paidStatus: 'paid',
+          pickedUp: false,
+        },
+      ],
+      items: clonedItems,
+      messages: [
+        {
+          id: `msg_${nowTs}`,
+          poolId: `pool_${nowTs}`,
+          userId: activeUser.id,
+          userName: activeUser.name,
+          avatarColor: activeUser.avatarColor,
+          isHost: true,
+          isAnnouncement: true,
+          text: `New weekly run launched from our ${activePool.supplierName} catalog! Invite code: ${nextCode}`,
+          createdAt: formatTimestamp(),
+        },
+      ],
+    };
+
+    const updatedPools = [rerunPool, ...pools];
+    setPools(updatedPools);
+    setSelectedPoolId(rerunPool.id);
+    setActiveTab('catalog');
+    await PoolRepository.saveLocalPools(updatedPools);
+
+    if (PoolRepository.getCurrentConfig().enabled) {
+      await PoolRepository.syncNewPool(rerunPool);
+    }
+  };
+
   const handleToggleLockPool = async () => {
     const nextStatus: 'open' | 'locked' =
       activePool.status === 'locked' ? 'open' : 'locked';
@@ -254,9 +352,6 @@ export default function App() {
     }
   };
 
-  /**
-   * Host Resolution Option 1: Host claims remaining shares of a partial bulk case so it ships
-   */
   const handleHostCoverRemainder = async (
     itemId: string,
     neededQty: number
@@ -308,9 +403,6 @@ export default function App() {
     }
   };
 
-  /**
-   * Host Resolution Option 2: Trim/drop the unfilled partial case units so only full cases remain
-   */
   const handleTrimPartialCase = async (itemId: string) => {
     let trimmedClaimsForSync: ParticipantShare[] = [];
 
@@ -359,9 +451,6 @@ export default function App() {
     }
   };
 
-  /**
-   * Simulates another neighbor in the pool claiming a share of an item in real time
-   */
   const handleSimulateNeighborAction = async () => {
     const otherNeighbors = DEMO_PROFILES.filter((p) => p.id !== activeUser.id);
     const randomNeighbor =
@@ -526,6 +615,7 @@ export default function App() {
     (b) => b.userId === activeUser.id
   );
   const summary = getPoolProgressSummary(activePool);
+  const messageCount = (activePool.messages || []).length;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -554,24 +644,32 @@ export default function App() {
                 ]}
               />
               <Text style={styles.syncPillText}>
-                {syncStatus.mode === 'supabase_live'
-                  ? 'Live Sync'
-                  : 'Local Mode'}
+                {syncStatus.mode === 'supabase_live' ? 'Live' : 'Local'}
               </Text>
             </TouchableOpacity>
           </View>
           <TouchableOpacity onPress={() => setActiveTab('architecture')}>
             <Text style={styles.locationSub}>
-              👤 Acting as:{' '}
+              👤{' '}
               <Text style={{ fontWeight: '800', color: '#0F172A' }}>
                 {activeUser.name}
               </Text>{' '}
-              (Switch)
+              • Code:{' '}
+              <Text style={{ fontWeight: '800', color: '#0D9488' }}>
+                {activePool.joinCode}
+              </Text>
             </Text>
           </TouchableOpacity>
         </View>
 
         <View style={styles.headerActions}>
+          <TouchableOpacity
+            style={styles.codeJoinButton}
+            onPress={() => setShowJoinByCodeModal(true)}
+          >
+            <Text style={styles.codeJoinButtonText}>🔑 Code</Text>
+          </TouchableOpacity>
+
           <TouchableOpacity
             style={styles.sharePoolButton}
             onPress={handleSharePoolInvite}
@@ -623,8 +721,8 @@ export default function App() {
                     isSelected && styles.poolPillMetaSelected,
                   ]}
                 >
-                  ${poolSummary.combinedPoolTotal.toFixed(0)} / $
-                  {pool.minimumOrderAmount} min • {pool.cutoffTime}
+                  [{pool.joinCode}] ${poolSummary.combinedPoolTotal.toFixed(0)} / $
+                  {pool.minimumOrderAmount} min
                 </Text>
               </TouchableOpacity>
             );
@@ -643,7 +741,7 @@ export default function App() {
             <Text style={styles.supplierBadgeText}>
               {activePool.status === 'locked'
                 ? '🔒 POOL LOCKED • READY FOR ORDER & PICKUP'
-                : activePool.supplierBadge}
+                : `${activePool.supplierBadge} • CODE: ${activePool.joinCode}`}
             </Text>
             <Text style={styles.poolMainTitle}>{activePool.title}</Text>
             <Text style={styles.supplierSubText}>
@@ -687,7 +785,24 @@ export default function App() {
                 activeTab === 'splits' && styles.tabButtonTextActive,
               ]}
             >
-              💸 Pay Split
+              💸 Splits
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.tabButton,
+              activeTab === 'chat' && styles.tabButtonActive,
+            ]}
+            onPress={() => setActiveTab('chat')}
+          >
+            <Text
+              style={[
+                styles.tabButtonText,
+                activeTab === 'chat' && styles.tabButtonTextActive,
+              ]}
+            >
+              💬 Chat ({messageCount})
             </Text>
           </TouchableOpacity>
 
@@ -704,7 +819,7 @@ export default function App() {
                 activeTab === 'host_sheet' && styles.tabButtonTextActive,
               ]}
             >
-              📋 Host Sheet
+              📋 Host
             </Text>
           </TouchableOpacity>
 
@@ -789,10 +904,19 @@ export default function App() {
           />
         )}
 
+        {activeTab === 'chat' && (
+          <PoolChatView
+            pool={activePool}
+            activeUser={activeUser}
+            onSendMessage={handleSendMessage}
+          />
+        )}
+
         {activeTab === 'host_sheet' && (
           <HostOrderSheetView
             pool={activePool}
             onToggleLockPool={handleToggleLockPool}
+            onRerunWeeklyPool={handleRerunWeeklyPool}
             onHostCoverRemainder={handleHostCoverRemainder}
             onTrimPartialCase={handleTrimPartialCase}
             onTogglePaidStatus={handleTogglePaidStatus}
@@ -862,6 +986,16 @@ export default function App() {
         onClose={() => setShowCreatePoolModal(false)}
         onCreatePool={handleCreatePool}
       />
+
+      <JoinByCodeModal
+        visible={showJoinByCodeModal}
+        pools={pools}
+        onClose={() => setShowJoinByCodeModal(false)}
+        onSelectPoolId={(poolId) => {
+          setSelectedPoolId(poolId);
+          setActiveTab('catalog');
+        }}
+      />
     </SafeAreaView>
   );
 }
@@ -875,7 +1009,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
     paddingTop: 10,
     paddingBottom: 10,
     backgroundColor: '#FFFFFF',
@@ -888,14 +1022,14 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   brandTitle: {
-    fontSize: 20,
+    fontSize: 19,
     fontWeight: '900',
     color: '#0F172A',
   },
   syncPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 8,
+    paddingHorizontal: 7,
     paddingVertical: 3,
     borderRadius: 999,
     borderWidth: 1,
@@ -912,7 +1046,7 @@ const styles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    marginRight: 5,
+    marginRight: 4,
   },
   syncPillText: {
     fontSize: 10,
@@ -920,7 +1054,7 @@ const styles = StyleSheet.create({
     color: '#0F766E',
   },
   locationSub: {
-    fontSize: 12,
+    fontSize: 11,
     color: '#64748B',
     fontWeight: '600',
     marginTop: 2,
@@ -928,31 +1062,44 @@ const styles = StyleSheet.create({
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 5,
+  },
+  codeJoinButton: {
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    paddingHorizontal: 9,
+    paddingVertical: 7,
+    borderRadius: 9,
+  },
+  codeJoinButtonText: {
+    color: '#0F172A',
+    fontWeight: '800',
+    fontSize: 11,
   },
   sharePoolButton: {
     backgroundColor: '#F0FDFA',
     borderWidth: 1,
     borderColor: '#5EEAD4',
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 10,
+    paddingHorizontal: 9,
+    paddingVertical: 7,
+    borderRadius: 9,
   },
   sharePoolButtonText: {
     color: '#0F766E',
     fontWeight: '800',
-    fontSize: 12,
+    fontSize: 11,
   },
   newPoolButton: {
     backgroundColor: '#0F172A',
-    paddingHorizontal: 11,
-    paddingVertical: 8,
-    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 9,
   },
   newPoolButtonText: {
     color: '#FFFFFF',
     fontWeight: '700',
-    fontSize: 12,
+    fontSize: 11,
   },
   poolSelectorWrap: {
     backgroundColor: '#FFFFFF',
@@ -1046,7 +1193,7 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
   tabButtonText: {
-    fontSize: 11,
+    fontSize: 10.5,
     fontWeight: '700',
     color: '#475569',
   },

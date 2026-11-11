@@ -10,7 +10,14 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import { CatalogItem, GroupBuyPool, ItemMode, Participant } from '../types/groupBuy';
+import {
+  CatalogItem,
+  GroupBuyPool,
+  ItemMode,
+  Participant,
+  SupplierCatalogTemplate,
+} from '../types/groupBuy';
+import { SUPPLIER_TEMPLATES } from '../data/mockPools';
 
 interface AddItemModalProps {
   visible: boolean;
@@ -203,64 +210,112 @@ export const CreatePoolModal: React.FC<CreatePoolModalProps> = ({
   onClose,
   onCreatePool,
 }) => {
-  const [title, setTitle] = useState('');
-  const [supplierName, setSupplierName] = useState('');
-  const [minimumOrder, setMinimumOrder] = useState('250');
-  const [freeThreshold, setFreeThreshold] = useState('350');
-  const [pickupAddress, setPickupAddress] = useState('Victoria Gardens Drop Point');
-  const [pickupWindow, setPickupWindow] = useState('Sat • 10:00 AM – 1:00 PM');
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(
+    SUPPLIER_TEMPLATES[0].id
+  );
+  const [title, setTitle] = useState(SUPPLIER_TEMPLATES[0].name);
+  const [supplierName, setSupplierName] = useState(
+    SUPPLIER_TEMPLATES[0].supplierName
+  );
+  const [minimumOrder, setMinimumOrder] = useState(
+    String(SUPPLIER_TEMPLATES[0].defaultMinimumOrder)
+  );
+  const [freeThreshold, setFreeThreshold] = useState(
+    String(SUPPLIER_TEMPLATES[0].defaultFreeThreshold)
+  );
+  const [venmoHandle, setVenmoHandle] = useState('Vincent-Phan-Coop');
+  const [pickupAddress, setPickupAddress] = useState(
+    'Victoria Gardens Drop Point'
+  );
+  const [pickupWindow, setPickupWindow] = useState(
+    'Sat • 10:00 AM – 1:00 PM'
+  );
+
+  const handleSelectTemplate = (tpl: SupplierCatalogTemplate) => {
+    setSelectedTemplateId(tpl.id);
+    setTitle(tpl.name);
+    setSupplierName(tpl.supplierName);
+    setMinimumOrder(String(tpl.defaultMinimumOrder));
+    setFreeThreshold(String(tpl.defaultFreeThreshold));
+  };
+
+  const generateJoinCode = (poolTitle: string) => {
+    const prefix = poolTitle
+      .replace(/[^a-zA-Z]/g, '')
+      .slice(0, 4)
+      .toUpperCase();
+    const num = Math.floor(10 + Math.random() * 89);
+    return `${prefix || 'POOL'}-${num}`;
+  };
 
   const handleCreate = () => {
     if (!title.trim()) return;
     const minAmt = parseFloat(minimumOrder) || 200;
     const freeAmt = parseFloat(freeThreshold) || minAmt + 100;
+    const tpl =
+      SUPPLIER_TEMPLATES.find((t) => t.id === selectedTemplateId) ||
+      SUPPLIER_TEMPLATES[0];
+
+    const nowTs = Date.now();
+    const joinCode = generateJoinCode(title);
+
+    const templateItems: CatalogItem[] = tpl.items.map((raw, idx) => ({
+      ...raw,
+      id: `item_${nowTs}_${idx}`,
+      claims:
+        idx === 0
+          ? [
+              {
+                userId: activeUser.id,
+                userName: activeUser.name,
+                avatarColor: activeUser.avatarColor,
+                quantity: 1,
+              },
+            ]
+          : [],
+    }));
 
     const newPool: GroupBuyPool = {
-      id: `pool_${Date.now()}`,
+      id: `pool_${nowTs}`,
+      joinCode,
       title: title.trim(),
-      supplierName: supplierName.trim() || 'Local Wholesale Distributor',
-      supplierBadge: `Wholesale Direct • $${minAmt} Minimum`,
-      category: 'Community Group Buy',
+      supplierName: supplierName.trim() || tpl.supplierName,
+      supplierBadge: tpl.supplierBadge,
+      category: tpl.category,
       hostName: activeUser.name,
+      hostVenmoHandle: venmoHandle.trim() || 'PoolCart-Host',
       neighborhood: activeUser.neighborhood,
       pickupAddress,
       pickupWindow,
       cutoffTime: 'Fri at 8:00 PM',
       minimumOrderAmount: minAmt,
-      deliveryFee: 20,
+      deliveryFee: tpl.defaultDeliveryFee,
       freeDeliveryThreshold: freeAmt,
       status: 'open',
       participants: [
         {
           ...activeUser,
           isHost: true,
+          paidStatus: 'paid',
         },
       ],
-      items: [
+      items: templateItems,
+      messages: [
         {
-          id: `item_${Date.now()}_1`,
-          name: 'Wholesale Organic Produce Box (Standard Share)',
-          category: 'Produce',
-          emoji: '🥬',
-          mode: 'individual',
-          unitLabel: '15 lb mixed box',
-          unitPrice: 24.0,
-          retailPrice: 38.0,
-          claims: [
-            {
-              userId: activeUser.id,
-              userName: activeUser.name,
-              avatarColor: activeUser.avatarColor,
-              quantity: 1,
-            },
-          ],
+          id: `msg_${nowTs}`,
+          poolId: `pool_${nowTs}`,
+          userId: activeUser.id,
+          userName: activeUser.name,
+          avatarColor: activeUser.avatarColor,
+          isHost: true,
+          isAnnouncement: true,
+          text: `Welcome to ${title.trim()}! Share code ${joinCode} with neighbors so we can hit the $${minAmt} wholesale minimum together.`,
+          createdAt: 'Just now',
         },
       ],
     };
 
     onCreatePool(newPool);
-    setTitle('');
-    setSupplierName('');
     onClose();
   };
 
@@ -273,25 +328,73 @@ export const CreatePoolModal: React.FC<CreatePoolModalProps> = ({
         <View style={styles.sheet}>
           <Text style={styles.title}>Host a Neighborhood Group Buy</Text>
           <Text style={styles.subtitle}>
-            Hosting as {activeUser.name} ({activeUser.neighborhood})
+            Pick a pre-loaded wholesale supplier catalog template or customize your own.
           </Text>
 
           <ScrollView style={styles.formScroll}>
+            <Text style={styles.label}>
+              ⚡ 1-Tap Wholesale Supplier Catalog Template
+            </Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.tplScroll}
+            >
+              {SUPPLIER_TEMPLATES.map((tpl) => {
+                const isSelected = tpl.id === selectedTemplateId;
+                return (
+                  <TouchableOpacity
+                    key={tpl.id}
+                    style={[
+                      styles.tplCard,
+                      isSelected && styles.tplCardSelected,
+                    ]}
+                    onPress={() => handleSelectTemplate(tpl)}
+                  >
+                    <Text style={styles.tplEmoji}>{tpl.emoji}</Text>
+                    <Text
+                      style={[
+                        styles.tplName,
+                        isSelected && styles.tplNameSelected,
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {tpl.name}
+                    </Text>
+                    <Text style={styles.tplMeta}>
+                      {tpl.items.length} bulk items • ${tpl.defaultMinimumOrder}{' '}
+                      min
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
             <Text style={styles.label}>Pool Title</Text>
             <TextInput
               style={styles.input}
-              placeholder="e.g. Costco Business Center Bulk Run"
               value={title}
               onChangeText={setTitle}
             />
 
-            <Text style={styles.label}>Wholesale Supplier / Store</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="e.g. Azure Standard / Restaurant Depot"
-              value={supplierName}
-              onChangeText={setSupplierName}
-            />
+            <View style={styles.row}>
+              <View style={{ flex: 1, marginRight: 8 }}>
+                <Text style={styles.label}>Supplier / Distributor</Text>
+                <TextInput
+                  style={styles.input}
+                  value={supplierName}
+                  onChangeText={setSupplierName}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.label}>Host Venmo (@handle)</Text>
+                <TextInput
+                  style={styles.input}
+                  value={venmoHandle}
+                  onChangeText={setVenmoHandle}
+                />
+              </View>
+            </View>
 
             <View style={styles.row}>
               <View style={{ flex: 1, marginRight: 8 }}>
@@ -334,7 +437,111 @@ export const CreatePoolModal: React.FC<CreatePoolModalProps> = ({
               <Text style={styles.cancelBtnText}>Cancel</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.saveBtn} onPress={handleCreate}>
-              <Text style={styles.saveBtnText}>Launch Pool</Text>
+              <Text style={styles.saveBtnText}>
+                Launch Pool ({
+                  (
+                    SUPPLIER_TEMPLATES.find((t) => t.id === selectedTemplateId) ||
+                    SUPPLIER_TEMPLATES[0]
+                  ).items.length
+                }{' '}
+                Items)
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+};
+
+interface JoinByCodeModalProps {
+  visible: boolean;
+  pools: GroupBuyPool[];
+  onClose: () => void;
+  onSelectPoolId: (poolId: string) => void;
+}
+
+export const JoinByCodeModal: React.FC<JoinByCodeModalProps> = ({
+  visible,
+  pools,
+  onClose,
+  onSelectPoolId,
+}) => {
+  const [codeInput, setCodeInput] = useState('');
+  const [errorText, setErrorText] = useState('');
+
+  const handleJoin = () => {
+    const cleaned = codeInput.trim().toUpperCase();
+    if (!cleaned) return;
+
+    const matched = pools.find(
+      (p) => p.joinCode.toUpperCase() === cleaned || p.id.toUpperCase() === cleaned
+    );
+
+    if (!matched) {
+      setErrorText(
+        `No neighborhood pool found with code "${cleaned}". Try one of the active codes below!`
+      );
+      return;
+    }
+
+    setErrorText('');
+    setCodeInput('');
+    onSelectPoolId(matched.id);
+    onClose();
+  };
+
+  return (
+    <Modal visible={visible} animationType="fade" transparent>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.overlay}
+      >
+        <View style={styles.sheet}>
+          <Text style={styles.title}>🔑 Join a Pool by Invite Code</Text>
+          <Text style={styles.subtitle}>
+            Enter the 6-character code shared by your neighborhood host (or tap an active pool code below).
+          </Text>
+
+          <TextInput
+            style={[styles.input, styles.codeInputBig]}
+            placeholder="e.g. VG-FARM or WEEE-88"
+            autoCapitalize="characters"
+            autoCorrect={false}
+            value={codeInput}
+            onChangeText={(val) => {
+              setCodeInput(val);
+              setErrorText('');
+            }}
+          />
+
+          {errorText ? <Text style={styles.errorMsg}>{errorText}</Text> : null}
+
+          <Text style={styles.label}>Active Neighborhood Codes Near You</Text>
+          <View style={styles.activeCodesWrap}>
+            {pools.map((p) => (
+              <TouchableOpacity
+                key={p.id}
+                style={styles.activeCodeChip}
+                onPress={() => {
+                  onSelectPoolId(p.id);
+                  onClose();
+                }}
+              >
+                <Text style={styles.activeCodeBadge}>{p.joinCode}</Text>
+                <Text style={styles.activeCodeTitle} numberOfLines={1}>
+                  {p.title}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <View style={[styles.actionsRow, { marginTop: 16 }]}>
+            <TouchableOpacity style={styles.cancelBtn} onPress={onClose}>
+              <Text style={styles.cancelBtnText}>Close</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.saveBtn} onPress={handleJoin}>
+              <Text style={styles.saveBtnText}>Join Pool</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -354,7 +561,7 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     padding: 20,
-    maxHeight: '88%',
+    maxHeight: '90%',
   },
   title: {
     fontSize: 18,
@@ -369,6 +576,41 @@ const styles = StyleSheet.create({
   },
   formScroll: {
     marginBottom: 14,
+  },
+  tplScroll: {
+    marginBottom: 8,
+  },
+  tplCard: {
+    width: 195,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 12,
+    padding: 10,
+    marginRight: 10,
+  },
+  tplCardSelected: {
+    backgroundColor: '#F0FDFA',
+    borderColor: '#0D9488',
+    borderWidth: 1.5,
+  },
+  tplEmoji: {
+    fontSize: 22,
+    marginBottom: 4,
+  },
+  tplName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1E293B',
+  },
+  tplNameSelected: {
+    color: '#0F766E',
+    fontWeight: '800',
+  },
+  tplMeta: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2,
   },
   modeSwitchRow: {
     flexDirection: 'row',
@@ -414,6 +656,48 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     fontSize: 14,
     color: '#0F172A',
+  },
+  codeInputBig: {
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+    textAlign: 'center',
+  },
+  errorMsg: {
+    fontSize: 12,
+    color: '#DC2626',
+    fontWeight: '600',
+    marginTop: 6,
+  },
+  activeCodesWrap: {
+    gap: 8,
+    marginTop: 4,
+  },
+  activeCodeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 10,
+    padding: 10,
+    gap: 10,
+  },
+  activeCodeBadge: {
+    backgroundColor: '#0F172A',
+    color: '#5EEAD4',
+    fontWeight: '800',
+    fontSize: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    overflow: 'hidden',
+  },
+  activeCodeTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1E293B',
+    flex: 1,
   },
   row: {
     flexDirection: 'row',
