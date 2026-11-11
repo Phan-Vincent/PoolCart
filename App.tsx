@@ -27,6 +27,7 @@ import {
   PastOrderReceipt,
   PoolMessage,
   PoolNotificationAlert,
+  PorchDropCheckIn,
   ReceiptTrueUp,
   WishlistRequest,
 } from './src/types/groupBuy';
@@ -64,6 +65,8 @@ import {
   LiveToastBanner,
   NotificationCenterModal,
 } from './src/components/NotificationCenterModal';
+import { PilotFlyerModal } from './src/components/PilotFlyerModal';
+import { BulkImportModal } from './src/components/BulkImportModal';
 import { SupabaseSetupCard } from './src/components/SupabaseSetupCard';
 
 type ActiveTab =
@@ -74,6 +77,7 @@ type ActiveTab =
   | 'wallet'
   | 'architecture';
 type ItemFilter = 'all' | 'individual' | 'case_split';
+type RadiusFilter = 'all' | 'under_1mi' | 'under_2mi';
 
 export default function App() {
   const [pools, setPools] = useState<GroupBuyPool[]>(INITIAL_POOLS);
@@ -83,6 +87,7 @@ export default function App() {
   const [activeUser, setActiveUser] = useState<Participant>(CURRENT_USER);
   const [activeTab, setActiveTab] = useState<ActiveTab>('catalog');
   const [itemFilter, setItemFilter] = useState<ItemFilter>('all');
+  const [radiusFilter, setRadiusFilter] = useState<RadiusFilter>('all');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState<string>('');
 
@@ -90,6 +95,11 @@ export default function App() {
   const [showCreatePoolModal, setShowCreatePoolModal] = useState(false);
   const [showJoinByCodeModal, setShowJoinByCodeModal] = useState(false);
   const [showNotificationModal, setShowNotificationModal] = useState(false);
+  const [showPilotFlyerModal, setShowPilotFlyerModal] = useState(false);
+  const [showBulkImportModal, setShowBulkImportModal] = useState(false);
+  const [bulkImportMode, setBulkImportMode] = useState<
+    'catalog_import' | 'receipt_ocr'
+  >('catalog_import');
 
   const [alerts, setAlerts] = useState<PoolNotificationAlert[]>(INITIAL_ALERTS);
   const [notifPrefs, setNotifPrefs] = useState<NotificationPreferences>(
@@ -233,8 +243,17 @@ export default function App() {
     };
   }, [refreshPools, applyDeepLinkPoolCode]);
 
+  const visiblePools = pools.filter((p) => {
+    const dist = p.distanceMiles ?? 0.5;
+    if (radiusFilter === 'under_1mi') return dist <= 1.0;
+    if (radiusFilter === 'under_2mi') return dist <= 2.0;
+    return true;
+  });
+
   const activePool =
-    pools.find((p) => p.id === selectedPoolId) || pools[0];
+    pools.find((p) => p.id === selectedPoolId) ||
+    visiblePools[0] ||
+    pools[0];
 
   // Determine whether the activeUser is the verified Host of activePool
   const isCurrentUserHost = Boolean(
@@ -380,6 +399,163 @@ export default function App() {
           lastSyncedAt: formatTimestamp(),
         }));
       }
+    }
+  };
+
+  /**
+   * Track #2: Bulk Catalog Paste & Smart Receipt OCR Handlers
+   */
+  const handleOpenBulkImportModal = (
+    mode: 'catalog_import' | 'receipt_ocr'
+  ) => {
+    setBulkImportMode(mode);
+    setShowBulkImportModal(true);
+  };
+
+  const handleImportCatalogItems = async (importedItems: CatalogItem[]) => {
+    const updatedPools = pools.map((pool) => {
+      if (pool.id !== activePool.id) return pool;
+      return {
+        ...pool,
+        items: [...importedItems, ...pool.items],
+      };
+    });
+
+    setPools(updatedPools);
+    await PoolRepository.saveLocalPools(updatedPools);
+
+    const alert = NotificationService.createAlert(
+      activePool,
+      'case_locked',
+      `📋 Imported ${importedItems.length} Wholesale Items!`,
+      `Added ${importedItems.length} bulk items directly into ${activePool.title}.`
+    );
+    await pushAlerts([alert]);
+  };
+
+  const handleApplyParsedReceipt = async (
+    priceUpdates: { itemId: string; newPrice: number }[],
+    detectedTaxOrFee: number,
+    note: string
+  ) => {
+    const reconciledTime = formatTimestamp();
+    const updatedPools = pools.map((pool) => {
+      if (pool.id !== activePool.id) return pool;
+      const nextItems = pool.items.map((it) => {
+        const match = priceUpdates.find((u) => u.itemId === it.id);
+        return match ? { ...it, actualUnitPrice: match.newPrice } : it;
+      });
+      return {
+        ...pool,
+        items: nextItems,
+        trueUp: {
+          ...pool.trueUp,
+          taxOrBagFee: detectedTaxOrFee,
+          receiptNote: note,
+          reconciledAt: reconciledTime,
+        },
+      };
+    });
+
+    setPools(updatedPools);
+    await PoolRepository.saveLocalPools(updatedPools);
+
+    const alert = NotificationService.createAlert(
+      activePool,
+      'minimum_met',
+      `📸 Receipt OCR True-Up Applied (${priceUpdates.length} items)!`,
+      `Updated ${priceUpdates.length} item prices and $${detectedTaxOrFee.toFixed(2)} receipt tax/CRV across all neighbor splits.`
+    );
+    await pushAlerts([alert]);
+  };
+
+  /**
+   * Track #3: Stripe PaymentIntent Pre-Authorization Hold & Batch Capture
+   */
+  const handleAuthorizeStripeHold = async (userId: string, amount: number) => {
+    const holdId = `pi_${Date.now().toString(36)}`;
+    const updatedPools: GroupBuyPool[] = pools.map((pool) => {
+      if (pool.id !== activePool.id) return pool;
+      return {
+        ...pool,
+        participants: pool.participants.map((p) =>
+          p.id === userId
+            ? {
+                ...p,
+                paidStatus: 'stripe_authorized',
+                stripeHoldId: holdId,
+                stripeAuthorizedAmount: amount,
+              }
+            : p
+        ),
+      };
+    });
+
+    setPools(updatedPools);
+    await PoolRepository.saveLocalPools(updatedPools);
+
+    const alert = NotificationService.createAlert(
+      activePool,
+      'minimum_met',
+      `💳 Stripe Card Hold Authorized ($${amount.toFixed(2)})`,
+      `PaymentIntent (${holdId}) placed on manual capture—$0 charged until the pool locks at cutoff.`
+    );
+    await pushAlerts([alert]);
+  };
+
+  const handleCaptureAllStripeHolds = async () => {
+    let capturedCount = 0;
+    const updatedPools: GroupBuyPool[] = pools.map((pool) => {
+      if (pool.id !== activePool.id) return pool;
+      return {
+        ...pool,
+        participants: pool.participants.map((p) => {
+          if (p.paidStatus === 'stripe_authorized') {
+            capturedCount += 1;
+            return { ...p, paidStatus: 'paid' };
+          }
+          return p;
+        }),
+      };
+    });
+
+    setPools(updatedPools);
+    await PoolRepository.saveLocalPools(updatedPools);
+
+    if (capturedCount > 0) {
+      const alert = NotificationService.createAlert(
+        activePool,
+        'minimum_met',
+        `⚡ Captured ${capturedCount} Stripe Hold(s)!`,
+        `All authorized neighbor card holds in ${activePool.title} have been captured and marked ✓ Paid.`
+      );
+      await pushAlerts([alert]);
+    }
+  };
+
+  /**
+   * Track #4: Porch Cooler Drop-Off Check-In Handler
+   */
+  const handleUpdatePorchCheckIn = async (checkIn: PorchDropCheckIn) => {
+    const updatedPools = pools.map((pool) => {
+      if (pool.id !== activePool.id) return pool;
+      return {
+        ...pool,
+        porchCheckIn: checkIn,
+      };
+    });
+
+    setPools(updatedPools);
+    await PoolRepository.saveLocalPools(updatedPools);
+
+    if (checkIn.status === 'ready_on_porch') {
+      const alert = NotificationService.createAlert(
+        activePool,
+        'porch_pickup_ready',
+        `🧊 Cooler Drop Ready on Porch (${activePool.joinCode})!`,
+        `${checkIn.coolerLocationNote} • Access: ${checkIn.accessCodeOrPin || 'Open Porch'}`
+      );
+      await pushAlerts([alert]);
     }
   };
 
@@ -967,6 +1143,7 @@ export default function App() {
     const poolWithHostId: GroupBuyPool = {
       ...newPool,
       hostUserId: activeUser.id,
+      distanceMiles: 0.2,
     };
     const updatedPools = [poolWithHostId, ...pools];
     setPools(updatedPools);
@@ -1108,17 +1285,17 @@ export default function App() {
             </TouchableOpacity>
 
             <TouchableOpacity
+              style={styles.qrFlyerButton}
+              onPress={() => setShowPilotFlyerModal(true)}
+            >
+              <Text style={styles.qrFlyerButtonText}>🖨️ QR</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
               style={styles.codeJoinButton}
               onPress={() => setShowJoinByCodeModal(true)}
             >
               <Text style={styles.codeJoinButtonText}>🔑 Code</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.sharePoolButton}
-              onPress={handleSharePoolInvite}
-            >
-              <Text style={styles.sharePoolButtonText}>📤</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -1140,14 +1317,43 @@ export default function App() {
           }}
         />
 
-        {/* Horizontal Pool Selector */}
+        {/* Track #4: Neighborhood Radius Filter & Horizontal Pool Selector */}
         <View style={styles.poolSelectorWrap}>
+          <View style={styles.radiusFilterBar}>
+            <Text style={styles.radiusLabel}>📍 Drop-Points Near You:</Text>
+            {(
+              [
+                { key: 'all', label: 'All Rancho Cucamonga' },
+                { key: 'under_1mi', label: '< 0.5 mi (Walkable)' },
+                { key: 'under_2mi', label: '< 2.0 mi' },
+              ] as const
+            ).map((r) => (
+              <TouchableOpacity
+                key={r.key}
+                style={[
+                  styles.radiusChip,
+                  radiusFilter === r.key && styles.radiusChipActive,
+                ]}
+                onPress={() => setRadiusFilter(r.key)}
+              >
+                <Text
+                  style={[
+                    styles.radiusChipText,
+                    radiusFilter === r.key && styles.radiusChipTextActive,
+                  ]}
+                >
+                  {r.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={styles.poolScrollContent}
           >
-            {pools.map((pool) => {
+            {visiblePools.map((pool) => {
               const isSelected = pool.id === activePool.id;
               const poolSummary = getPoolProgressSummary(pool);
               return (
@@ -1178,8 +1384,9 @@ export default function App() {
                       isSelected && styles.poolPillMetaSelected,
                     ]}
                   >
-                    [{pool.joinCode}] ${poolSummary.combinedPoolTotal.toFixed(0)} / $
-                    {pool.minimumOrderAmount} min
+                    [{pool.joinCode}] • {pool.distanceMiles ?? 0.4} mi • $
+                    {poolSummary.combinedPoolTotal.toFixed(0)}/$
+                    {pool.minimumOrderAmount}
                   </Text>
                 </TouchableOpacity>
               );
@@ -1194,7 +1401,7 @@ export default function App() {
         >
           {/* Active Pool Banner */}
           <View style={styles.supplierHeader}>
-            <View style={{ flex: 1 }}>
+            <View style={{ flex: 1, paddingRight: 8 }}>
               <Text style={styles.supplierBadgeText}>
                 {activePool.status === 'locked'
                   ? '🔒 POOL LOCKED • READY FOR ORDER & PICKUP'
@@ -1202,9 +1409,17 @@ export default function App() {
               </Text>
               <Text style={styles.poolMainTitle}>{activePool.title}</Text>
               <Text style={styles.supplierSubText}>
-                Supplier: {activePool.supplierName} • Host: {activePool.hostName}
+                Supplier: {activePool.supplierName} • Host: {activePool.hostName}{' '}
+                ({activePool.distanceMiles ?? 0.4} mi away)
               </Text>
             </View>
+
+            <TouchableOpacity
+              style={styles.howItWorksPill}
+              onPress={() => setShowPilotFlyerModal(true)}
+            >
+              <Text style={styles.howItWorksText}>👋 Guide & QR</Text>
+            </TouchableOpacity>
           </View>
 
           {/* Live Wholesale Minimum & Free Delivery Progress Bar */}
@@ -1362,14 +1577,14 @@ export default function App() {
                 ))}
               </ScrollView>
 
-              {/* Filter & Pitch Item Bar */}
+              {/* Filter & Pitch / Bulk Import Bar */}
               <View style={styles.filterRow}>
                 <View style={styles.filterPills}>
                   {(
                     [
-                      { key: 'all', label: 'All Modes' },
-                      { key: 'individual', label: 'Direct Wholesale' },
-                      { key: 'case_split', label: 'Bulk Case Splits' },
+                      { key: 'all', label: 'All' },
+                      { key: 'individual', label: 'Direct' },
+                      { key: 'case_split', label: 'Case Splits' },
                     ] as const
                   ).map((f) => (
                     <TouchableOpacity
@@ -1393,12 +1608,21 @@ export default function App() {
                 </View>
 
                 {activePool.status !== 'locked' && (
-                  <TouchableOpacity
-                    style={styles.pitchItemBtn}
-                    onPress={() => setShowAddItemModal(true)}
-                  >
-                    <Text style={styles.pitchItemBtnText}>+ Add Item</Text>
-                  </TouchableOpacity>
+                  <View style={{ flexDirection: 'row', gap: 6 }}>
+                    <TouchableOpacity
+                      style={styles.bulkPasteBtn}
+                      onPress={() => handleOpenBulkImportModal('catalog_import')}
+                    >
+                      <Text style={styles.bulkPasteBtnText}>📋 Bulk Paste</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={styles.pitchItemBtn}
+                      onPress={() => setShowAddItemModal(true)}
+                    >
+                      <Text style={styles.pitchItemBtnText}>+ Add Item</Text>
+                    </TouchableOpacity>
+                  </View>
                 )}
               </View>
 
@@ -1431,6 +1655,7 @@ export default function App() {
               currentUserId={activeUser.id}
               isCurrentUserHost={isCurrentUserHost}
               onTogglePaidStatus={handleTogglePaidStatus}
+              onAuthorizeStripeHold={handleAuthorizeStripeHold}
             />
           )}
 
@@ -1454,6 +1679,9 @@ export default function App() {
               onTrimPartialCase={handleTrimPartialCase}
               onUpdateItemActualPrice={handleUpdateItemActualPrice}
               onUpdateReceiptTrueUp={handleUpdateReceiptTrueUp}
+              onOpenBulkImportModal={handleOpenBulkImportModal}
+              onCaptureAllStripeHolds={handleCaptureAllStripeHolds}
+              onUpdatePorchCheckIn={handleUpdatePorchCheckIn}
               onTogglePaidStatus={handleTogglePaidStatus}
               onTogglePickedUp={handleTogglePickedUp}
             />
@@ -1554,6 +1782,22 @@ export default function App() {
           onTriggerPorchReadyAlert={handleTriggerPorchReadyAlert}
           onMarkAllRead={handleMarkAllAlertsRead}
         />
+
+        <PilotFlyerModal
+          visible={showPilotFlyerModal}
+          pool={activePool}
+          onClose={() => setShowPilotFlyerModal(false)}
+        />
+
+        <BulkImportModal
+          visible={showBulkImportModal}
+          pool={activePool}
+          activeUser={activeUser}
+          initialMode={bulkImportMode}
+          onClose={() => setShowBulkImportModal(false)}
+          onImportCatalogItems={handleImportCatalogItems}
+          onApplyParsedReceipt={handleApplyParsedReceipt}
+        />
       </SafeAreaView>
     </View>
   );
@@ -1643,6 +1887,19 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     fontSize: 11,
   },
+  qrFlyerButton: {
+    backgroundColor: '#F0FDFA',
+    borderWidth: 1,
+    borderColor: '#5EEAD4',
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+    borderRadius: 9,
+  },
+  qrFlyerButtonText: {
+    color: '#0F766E',
+    fontWeight: '800',
+    fontSize: 11,
+  },
   codeJoinButton: {
     backgroundColor: '#F1F5F9',
     borderWidth: 1,
@@ -1653,19 +1910,6 @@ const styles = StyleSheet.create({
   },
   codeJoinButtonText: {
     color: '#0F172A',
-    fontWeight: '800',
-    fontSize: 11,
-  },
-  sharePoolButton: {
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#5EEAD4',
-    paddingHorizontal: 8,
-    paddingVertical: 7,
-    borderRadius: 9,
-  },
-  sharePoolButtonText: {
-    color: '#0F766E',
     fontWeight: '800',
     fontSize: 11,
   },
@@ -1682,9 +1926,40 @@ const styles = StyleSheet.create({
   },
   poolSelectorWrap: {
     backgroundColor: '#FFFFFF',
-    paddingVertical: 10,
+    paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: '#E2E8F0',
+  },
+  radiusFilterBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    marginBottom: 8,
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+  radiusLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#475569',
+    marginRight: 2,
+  },
+  radiusChip: {
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  radiusChipActive: {
+    backgroundColor: '#0F172A',
+  },
+  radiusChipText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  radiusChipTextActive: {
+    color: '#FFFFFF',
   },
   poolScrollContent: {
     paddingHorizontal: 16,
@@ -1730,6 +2005,7 @@ const styles = StyleSheet.create({
   supplierHeader: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     marginBottom: 12,
   },
   supplierBadgeText: {
@@ -1750,6 +2026,19 @@ const styles = StyleSheet.create({
     color: '#475569',
     marginTop: 2,
     fontWeight: '500',
+  },
+  howItWorksPill: {
+    backgroundColor: '#F0FDFA',
+    borderWidth: 1,
+    borderColor: '#5EEAD4',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 10,
+  },
+  howItWorksText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#0F766E',
   },
   tabBar: {
     flexDirection: 'row',
@@ -1859,6 +2148,19 @@ const styles = StyleSheet.create({
   },
   filterChipTextActive: {
     color: '#FFFFFF',
+  },
+  bulkPasteBtn: {
+    backgroundColor: '#F0FDFA',
+    borderWidth: 1,
+    borderColor: '#5EEAD4',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  bulkPasteBtnText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#0F766E',
   },
   pitchItemBtn: {
     backgroundColor: '#F3E8FF',

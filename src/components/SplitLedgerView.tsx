@@ -15,6 +15,7 @@ interface Props {
   currentUserId: string;
   isCurrentUserHost: boolean;
   onTogglePaidStatus: (userId: string) => void;
+  onAuthorizeStripeHold: (userId: string, amount: number) => void;
 }
 
 export const SplitLedgerView: React.FC<Props> = ({
@@ -22,9 +23,11 @@ export const SplitLedgerView: React.FC<Props> = ({
   currentUserId,
   isCurrentUserHost,
   onTogglePaidStatus,
+  onAuthorizeStripeHold,
 }) => {
   const breakdowns = getParticipantBreakdowns(pool);
   const venmoHandle = pool.hostVenmoHandle || 'PoolCart-Host';
+  const porch = pool.porchCheckIn;
 
   const handlePayWithVenmo = async (
     userId: string,
@@ -62,13 +65,50 @@ export const SplitLedgerView: React.FC<Props> = ({
 
   return (
     <View style={styles.container}>
+      {/* Pickup & Live Porch Cooler Drop-Off Banner */}
       <View style={styles.pickupBanner}>
-        <Text style={styles.pickupTitle}>📍 Pickup & Drop-off Logistics</Text>
+        <View style={styles.pickupTopRow}>
+          <Text style={styles.pickupTitle}>📍 Pickup & Porch Cooler Status</Text>
+          {porch && (
+            <View
+              style={[
+                styles.porchStatusBadge,
+                porch.status === 'ready_on_porch'
+                  ? styles.porchReady
+                  : porch.status === 'sorting'
+                  ? styles.porchSorting
+                  : styles.porchWaiting,
+              ]}
+            >
+              <Text style={styles.porchStatusText}>
+                {porch.status === 'ready_on_porch'
+                  ? '🧊 READY ON PORCH'
+                  : porch.status === 'sorting'
+                  ? '📦 HOST SORTING'
+                  : '🚚 AWAITING DELIVERY'}
+              </Text>
+            </View>
+          )}
+        </View>
+
         <Text style={styles.pickupDetail}>
           Host: {pool.hostName} (@{venmoHandle})
         </Text>
         <Text style={styles.pickupDetail}>Address: {pool.pickupAddress}</Text>
         <Text style={styles.pickupDetail}>Window: {pool.pickupWindow}</Text>
+
+        {porch && (
+          <View style={styles.coolerCard}>
+            <Text style={styles.coolerPhotoTag}>
+              {porch.photoLabel || '📸 Porch Drop Zone'} • Access:{' '}
+              <Text style={{ fontWeight: '800' }}>
+                {porch.accessCodeOrPin || 'Open Porch'}
+              </Text>
+            </Text>
+            <Text style={styles.coolerNote}>"{porch.coolerLocationNote}"</Text>
+          </View>
+        )}
+
         <Text style={styles.cutoffNote}>
           {pool.status === 'locked'
             ? '🔒 Pool Locked — Ready for Settlement & Pickup'
@@ -76,7 +116,8 @@ export const SplitLedgerView: React.FC<Props> = ({
         </Text>
         {pool.trueUp?.reconciledAt && (
           <Text style={styles.trueUpBannerNote}>
-            🧾 Receipt True-Up Applied ({pool.trueUp.reconciledAt}): "{pool.trueUp.receiptNote}"
+            🧾 Receipt True-Up Applied ({pool.trueUp.reconciledAt}): "
+            {pool.trueUp.receiptNote}"
           </Text>
         )}
       </View>
@@ -117,6 +158,8 @@ export const SplitLedgerView: React.FC<Props> = ({
                   styles.paidChip,
                   b.paidStatus === 'paid'
                     ? styles.paidChipGreen
+                    : b.paidStatus === 'stripe_authorized'
+                    ? styles.paidChipPurple
                     : styles.paidChipAmber,
                   !canTogglePaid && { opacity: 0.5 },
                 ]}
@@ -128,10 +171,16 @@ export const SplitLedgerView: React.FC<Props> = ({
                     styles.paidChipText,
                     b.paidStatus === 'paid'
                       ? styles.paidTextGreen
+                      : b.paidStatus === 'stripe_authorized'
+                      ? styles.paidTextPurple
                       : styles.paidTextAmber,
                   ]}
                 >
-                  {b.paidStatus === 'paid' ? '✓ Paid' : 'Mark Paid'}
+                  {b.paidStatus === 'paid'
+                    ? '✓ Paid'
+                    : b.paidStatus === 'stripe_authorized'
+                    ? '💳 Hold Authorized'
+                    : 'Mark Paid'}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -154,8 +203,8 @@ export const SplitLedgerView: React.FC<Props> = ({
                         </Text>
                         {priceAdjusted && (
                           <Text style={styles.trueUpPriceSub}>
-                            🧾 Receipt price: ${li.effectiveUnitPrice.toFixed(2)}/unit
-                            (was ${li.quotedUnitPrice.toFixed(2)})
+                            🧾 Receipt price: ${li.effectiveUnitPrice.toFixed(2)}
+                            /unit (was ${li.quotedUnitPrice.toFixed(2)})
                           </Text>
                         )}
                         {li.isCaseSplit && (
@@ -216,18 +265,42 @@ export const SplitLedgerView: React.FC<Props> = ({
                   </Text>
                 </View>
 
-                {/* 1-Tap Venmo Deep Link Settlement Button */}
+                {/* Track #3: Dual Settlement Buttons (Stripe Pre-Auth Hold + 1-Tap Venmo) */}
                 {b.paidStatus !== 'paid' && b.totalDue > 0 && (
-                  <TouchableOpacity
-                    style={styles.venmoButton}
-                    onPress={() =>
-                      handlePayWithVenmo(b.userId, b.totalDue, b.userName)
-                    }
-                  >
-                    <Text style={styles.venmoButtonText}>
-                      💸 Pay ${b.totalDue.toFixed(2)} to @{venmoHandle} via Venmo
-                    </Text>
-                  </TouchableOpacity>
+                  <View style={styles.paymentButtonsWrap}>
+                    {b.paidStatus !== 'stripe_authorized' ? (
+                      <TouchableOpacity
+                        style={styles.stripeHoldButton}
+                        onPress={() =>
+                          onAuthorizeStripeHold(b.userId, b.totalDue)
+                        }
+                      >
+                        <Text style={styles.stripeHoldButtonText}>
+                          💳 Authorize Stripe Card Hold (${b.totalDue.toFixed(2)})
+                        </Text>
+                        <Text style={styles.stripeHoldSubText}>
+                          $0 charged now • Captures only if pool meets ${pool.minimumOrderAmount} min
+                        </Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <View style={styles.stripeAuthorizedBanner}>
+                        <Text style={styles.stripeAuthorizedText}>
+                          🔒 Stripe Hold Authorized (${b.totalDue.toFixed(2)}) • Ready for Host Capture
+                        </Text>
+                      </View>
+                    )}
+
+                    <TouchableOpacity
+                      style={styles.venmoButton}
+                      onPress={() =>
+                        handlePayWithVenmo(b.userId, b.totalDue, b.userName)
+                      }
+                    >
+                      <Text style={styles.venmoButtonText}>
+                        💸 Pay ${b.totalDue.toFixed(2)} to @{venmoHandle} via Venmo
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
                 )}
               </View>
             )}
@@ -250,11 +323,35 @@ const styles = StyleSheet.create({
     borderColor: '#99F6E4',
     marginBottom: 16,
   },
+  pickupTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
   pickupTitle: {
     fontSize: 14,
     fontWeight: '800',
     color: '#0F766E',
-    marginBottom: 6,
+  },
+  porchStatusBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  porchReady: {
+    backgroundColor: '#DCFCE7',
+  },
+  porchSorting: {
+    backgroundColor: '#FEF3C7',
+  },
+  porchWaiting: {
+    backgroundColor: '#E0F2FE',
+  },
+  porchStatusText: {
+    fontSize: 9,
+    fontWeight: '900',
+    color: '#0F172A',
   },
   pickupDetail: {
     fontSize: 13,
@@ -262,11 +359,30 @@ const styles = StyleSheet.create({
     marginBottom: 2,
     fontWeight: '500',
   },
+  coolerCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 10,
+    padding: 10,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#5EEAD4',
+  },
+  coolerPhotoTag: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#0F766E',
+  },
+  coolerNote: {
+    fontSize: 12,
+    color: '#1E293B',
+    fontStyle: 'italic',
+    marginTop: 3,
+  },
   cutoffNote: {
     fontSize: 12,
     fontWeight: '700',
     color: '#B45309',
-    marginTop: 6,
+    marginTop: 8,
   },
   trueUpBannerNote: {
     fontSize: 11,
@@ -334,15 +450,21 @@ const styles = StyleSheet.create({
   paidChipGreen: {
     backgroundColor: '#DCFCE7',
   },
+  paidChipPurple: {
+    backgroundColor: '#EDE9FE',
+  },
   paidChipAmber: {
     backgroundColor: '#FEF3C7',
   },
   paidChipText: {
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 11,
+    fontWeight: '800',
   },
   paidTextGreen: {
     color: '#15803D',
+  },
+  paidTextPurple: {
+    color: '#6D28D9',
   },
   paidTextAmber: {
     color: '#B45309',
@@ -430,8 +552,43 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#0D9488',
   },
-  venmoButton: {
+  paymentButtonsWrap: {
     marginTop: 12,
+    gap: 8,
+  },
+  stripeHoldButton: {
+    backgroundColor: '#4F46E5',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  stripeHoldButtonText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  stripeHoldSubText: {
+    color: '#E0E7FF',
+    fontSize: 10,
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  stripeAuthorizedBanner: {
+    backgroundColor: '#EDE9FE',
+    borderWidth: 1,
+    borderColor: '#C4B5FD',
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  stripeAuthorizedText: {
+    color: '#5B21B6',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  venmoButton: {
     backgroundColor: '#008CFF',
     paddingVertical: 11,
     borderRadius: 10,

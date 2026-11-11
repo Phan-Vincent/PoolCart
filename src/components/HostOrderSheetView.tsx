@@ -7,7 +7,12 @@ import {
   Share,
   TextInput,
 } from 'react-native';
-import { GroupBuyPool, Participant, ReceiptTrueUp } from '../types/groupBuy';
+import {
+  GroupBuyPool,
+  Participant,
+  PorchDropCheckIn,
+  ReceiptTrueUp,
+} from '../types/groupBuy';
 import {
   buildSupplierOrderExportText,
   getEffectiveUnitPrice,
@@ -27,6 +32,9 @@ interface Props {
   onTrimPartialCase: (itemId: string) => void;
   onUpdateItemActualPrice: (itemId: string, actualPrice: number | undefined) => void;
   onUpdateReceiptTrueUp: (trueUp: ReceiptTrueUp) => void;
+  onOpenBulkImportModal: (mode: 'catalog_import' | 'receipt_ocr') => void;
+  onCaptureAllStripeHolds: () => void;
+  onUpdatePorchCheckIn: (checkIn: PorchDropCheckIn) => void;
   onTogglePaidStatus: (userId: string) => void;
   onTogglePickedUp: (userId: string) => void;
 }
@@ -42,6 +50,9 @@ export const HostOrderSheetView: React.FC<Props> = ({
   onTrimPartialCase,
   onUpdateItemActualPrice,
   onUpdateReceiptTrueUp,
+  onOpenBulkImportModal,
+  onCaptureAllStripeHolds,
+  onUpdatePorchCheckIn,
   onTogglePaidStatus,
   onTogglePickedUp,
 }) => {
@@ -57,10 +68,29 @@ export const HostOrderSheetView: React.FC<Props> = ({
     pool.trueUp?.receiptNote || ''
   );
 
+  const [coolerNoteInput, setCoolerNoteInput] = useState(
+    pool.porchCheckIn?.coolerLocationNote ||
+      'Blue Yeti cooler on covered front porch by the planter box.'
+  );
+  const [accessPinInput, setAccessPinInput] = useState(
+    pool.porchCheckIn?.accessCodeOrPin || 'Gate #1492'
+  );
+  const [porchStatus, setPorchStatus] = useState<PorchDropCheckIn['status']>(
+    pool.porchCheckIn?.status || 'waiting_delivery'
+  );
+
   const summary = getPoolProgressSummary(pool);
   const manifest = getWholesaleOrderManifest(pool);
   const breakdowns = getParticipantBreakdowns(pool).filter(
     (b) => b.lineItems.length > 0
+  );
+
+  const stripeAuthorizedMembers = breakdowns.filter(
+    (b) => b.paidStatus === 'stripe_authorized'
+  );
+  const totalAuthorizedHoldAmount = stripeAuthorizedMembers.reduce(
+    (sum, b) => sum + b.totalDue,
+    0
   );
 
   const isLocked = pool.status === 'locked';
@@ -100,7 +130,28 @@ export const HostOrderSheetView: React.FC<Props> = ({
     });
   };
 
-  const handleApplyQuickDiscount = (itemId: string, quotedPrice: number, delta: number) => {
+  const handleSavePorchCheckIn = (nextStatus: PorchDropCheckIn['status']) => {
+    setPorchStatus(nextStatus);
+    onUpdatePorchCheckIn({
+      status: nextStatus,
+      coolerLocationNote: coolerNoteInput.trim(),
+      accessCodeOrPin: accessPinInput.trim(),
+      photoLabel:
+        nextStatus === 'ready_on_porch'
+          ? '📸 Verified Porch Cooler Drop Ready'
+          : '📸 Porch Drop Zone',
+      updatedAt: new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+    });
+  };
+
+  const handleApplyQuickDiscount = (
+    itemId: string,
+    quotedPrice: number,
+    delta: number
+  ) => {
     const next = Math.max(0.5, Number((quotedPrice + delta).toFixed(2)));
     onUpdateItemActualPrice(itemId, next);
   };
@@ -115,9 +166,11 @@ export const HostOrderSheetView: React.FC<Props> = ({
               🔒 Read-Only Neighbor View (Host Role Guard Active)
             </Text>
             <Text style={styles.roleGuardSub}>
-              You are viewing as <Text style={{ fontWeight: '800' }}>{activeUser.name}</Text>.
-              Only the verified Pool Host (<Text style={{ fontWeight: '800' }}>{pool.hostName}</Text>)
-              can lock the pool, reconcile receipts, or mark payments.
+              You are viewing as{' '}
+              <Text style={{ fontWeight: '800' }}>{activeUser.name}</Text>. Only
+              the verified Pool Host (
+              <Text style={{ fontWeight: '800' }}>{pool.hostName}</Text>) can
+              lock the pool, reconcile receipts, or capture payment holds.
             </Text>
           </View>
           <TouchableOpacity
@@ -175,9 +228,19 @@ export const HostOrderSheetView: React.FC<Props> = ({
         </View>
 
         <View style={styles.rerunRow}>
-          <Text style={styles.rerunHint}>
-            Want to run this exact supplier catalog again next week?
-          </Text>
+          <TouchableOpacity
+            style={[
+              styles.importShortcutBtn,
+              !isCurrentUserHost && styles.disabledBtn,
+            ]}
+            onPress={() => onOpenBulkImportModal('catalog_import')}
+            disabled={!isCurrentUserHost}
+          >
+            <Text style={styles.importShortcutText}>
+              📋 Bulk Paste Supplier List
+            </Text>
+          </TouchableOpacity>
+
           <TouchableOpacity
             style={[styles.rerunBtn, !isCurrentUserHost && styles.disabledBtn]}
             onPress={onRerunWeeklyPool}
@@ -188,15 +251,56 @@ export const HostOrderSheetView: React.FC<Props> = ({
         </View>
       </View>
 
+      {/* Track #3: Stripe Pre-Authorization Hold Batch Capture Card */}
+      <View style={styles.stripeCaptureCard}>
+        <View style={styles.controlHeaderRow}>
+          <View style={{ flex: 1, paddingRight: 10 }}>
+            <Text style={styles.stripeBadge}>
+              💳 STRIPE PAYMENTINTENT PRE-AUTH HOLDS (MANUAL CAPTURE)
+            </Text>
+            <Text style={styles.stripeTitle}>
+              {stripeAuthorizedMembers.length > 0
+                ? `${stripeAuthorizedMembers.length} Neighbor Hold(s) Ready ($${totalAuthorizedHoldAmount.toFixed(2)})`
+                : 'No Pending Card Holds to Capture'}
+            </Text>
+            <Text style={styles.stripeSub}>
+              {summary.isMinimumMet
+                ? 'Wholesale minimum is met! Capture all authorized card holds in 1 tap to settle the pool.'
+                : `Card holds can only be captured once the $${pool.minimumOrderAmount} wholesale minimum is met.`}
+            </Text>
+          </View>
+
+          <TouchableOpacity
+            style={[
+              styles.captureAllBtn,
+              (!isCurrentUserHost ||
+                stripeAuthorizedMembers.length === 0 ||
+                !summary.isMinimumMet) &&
+                styles.disabledBtn,
+            ]}
+            onPress={onCaptureAllStripeHolds}
+            disabled={
+              !isCurrentUserHost ||
+              stripeAuthorizedMembers.length === 0 ||
+              !summary.isMinimumMet
+            }
+          >
+            <Text style={styles.captureAllBtnText}>⚡ Capture All</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
       {/* Partial Bulk Cases Resolution Alert */}
       {manifest.partialCaseItems.length > 0 && (
         <View style={styles.partialAlertCard}>
           <Text style={styles.partialAlertTitle}>
-            ⚠️ Unfilled Bulk Cases Need Resolution ({manifest.partialCaseItems.length})
+            ⚠️ Unfilled Bulk Cases Need Resolution (
+            {manifest.partialCaseItems.length})
           </Text>
           <Text style={styles.partialAlertSub}>
             Wholesale suppliers only ship full cases. Before placing the supplier
-            order, either claim the remaining units as Host or trim the partial case:
+            order, either claim the remaining units as Host or trim the partial
+            case:
           </Text>
 
           {manifest.partialCaseItems.map((pItem) => (
@@ -210,14 +314,20 @@ export const HostOrderSheetView: React.FC<Props> = ({
                   <Text style={{ fontWeight: '800' }}>
                     {pItem.neededToFillNextCase} more
                   </Text>{' '}
-                  (${(pItem.neededToFillNextCase * pItem.effectiveUnitPrice).toFixed(2)})
-                  to complete case
+                  ($
+                  {(
+                    pItem.neededToFillNextCase * pItem.effectiveUnitPrice
+                  ).toFixed(2)}
+                  ) to complete case
                 </Text>
               </View>
 
               <View style={styles.partialActionBtns}>
                 <TouchableOpacity
-                  style={[styles.coverBtn, !isCurrentUserHost && styles.disabledBtn]}
+                  style={[
+                    styles.coverBtn,
+                    !isCurrentUserHost && styles.disabledBtn,
+                  ]}
                   onPress={() =>
                     onHostCoverRemainder(
                       pItem.itemId,
@@ -232,7 +342,10 @@ export const HostOrderSheetView: React.FC<Props> = ({
                 </TouchableOpacity>
 
                 <TouchableOpacity
-                  style={[styles.trimBtn, !isCurrentUserHost && styles.disabledBtn]}
+                  style={[
+                    styles.trimBtn,
+                    !isCurrentUserHost && styles.disabledBtn,
+                  ]}
                   onPress={() => onTrimPartialCase(pItem.itemId)}
                   disabled={!isCurrentUserHost}
                 >
@@ -244,19 +357,29 @@ export const HostOrderSheetView: React.FC<Props> = ({
         </View>
       )}
 
-      {/* Feature #2: Wholesale Receipt & Price Adjustment True-Up Card */}
+      {/* Feature #2 + Track #2: Wholesale Receipt True-Up + Smart Receipt OCR Scanner */}
       <View style={styles.manifestCard}>
         <View style={styles.manifestHeaderRow}>
-          <View style={{ flex: 1 }}>
+          <View style={{ flex: 1, paddingRight: 8 }}>
             <Text style={styles.sectionLabel}>
-              🧾 WHOLESALE RECEIPT TRUE-UP & WEIGHT RECONCILIATION
+              🧾 WHOLESALE RECEIPT TRUE-UP & OCR SCANNER
             </Text>
             <Text style={styles.trueUpSub}>
-              Did catch-weight meat or produce prices shift at the wholesale
-              register? Adjust unit prices or add receipt tax/bag fees—every
-              neighbor’s Venmo split updates pro-rata automatically.
+              Adjust unit prices or scan/paste your wholesale register receipt so
+              every neighbor’s split updates pro-rata automatically.
             </Text>
           </View>
+
+          <TouchableOpacity
+            style={[
+              styles.ocrScanButton,
+              !isCurrentUserHost && styles.disabledBtn,
+            ]}
+            onPress={() => onOpenBulkImportModal('receipt_ocr')}
+            disabled={!isCurrentUserHost}
+          >
+            <Text style={styles.ocrScanButtonText}>📸 Scan Receipt</Text>
+          </TouchableOpacity>
         </View>
 
         {pool.items.map((item) => {
@@ -283,14 +406,20 @@ export const HostOrderSheetView: React.FC<Props> = ({
 
               <View style={styles.trueUpBtnsRow}>
                 <TouchableOpacity
-                  style={[styles.adjChip, !isCurrentUserHost && styles.disabledBtn]}
+                  style={[
+                    styles.adjChip,
+                    !isCurrentUserHost && styles.disabledBtn,
+                  ]}
                   onPress={() => handleApplyQuickDiscount(item.id, eff, -0.5)}
                   disabled={!isCurrentUserHost}
                 >
                   <Text style={styles.adjChipText}>-$0.50</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={[styles.adjChip, !isCurrentUserHost && styles.disabledBtn]}
+                  style={[
+                    styles.adjChip,
+                    !isCurrentUserHost && styles.disabledBtn,
+                  ]}
                   onPress={() => handleApplyQuickDiscount(item.id, eff, 0.5)}
                   disabled={!isCurrentUserHost}
                 >
@@ -354,9 +483,72 @@ export const HostOrderSheetView: React.FC<Props> = ({
 
         {pool.trueUp?.reconciledAt && (
           <Text style={styles.reconciledBadge}>
-            ✓ Receipt reconciled at {pool.trueUp.reconciledAt}: "{pool.trueUp.receiptNote}"
+            ✓ Receipt reconciled at {pool.trueUp.reconciledAt}: "
+            {pool.trueUp.receiptNote}"
           </Text>
         )}
+      </View>
+
+      {/* Track #4: Porch Cooler Drop-Off Check-In & Gate PIN */}
+      <View style={styles.manifestCard}>
+        <Text style={styles.sectionLabel}>
+          🧊 PORCH COOLER DROP-OFF CHECK-IN & ACCESS PIN
+        </Text>
+        <Text style={styles.trueUpSub}>
+          Let neighbors know where the insulated coolers are placed and broadcast
+          when shares are sorted and ready for pickup:
+        </Text>
+
+        <View style={styles.porchStatusRow}>
+          {(
+            [
+              { key: 'waiting_delivery', label: '🚚 Awaiting Truck' },
+              { key: 'sorting', label: '📦 Sorting Shares' },
+              { key: 'ready_on_porch', label: '🧊 Ready on Porch!' },
+            ] as const
+          ).map((st) => (
+            <TouchableOpacity
+              key={st.key}
+              style={[
+                styles.porchStatusBtn,
+                porchStatus === st.key && styles.porchStatusBtnActive,
+                !isCurrentUserHost && styles.disabledBtn,
+              ]}
+              onPress={() => handleSavePorchCheckIn(st.key)}
+              disabled={!isCurrentUserHost}
+            >
+              <Text
+                style={[
+                  styles.porchStatusBtnText,
+                  porchStatus === st.key && styles.porchStatusBtnTextActive,
+                ]}
+              >
+                {st.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        <View style={styles.trueUpInputsRow}>
+          <View style={{ flex: 2, marginRight: 8 }}>
+            <Text style={styles.inputLbl}>Cooler / Drop Location Note</Text>
+            <TextInput
+              style={styles.input}
+              editable={isCurrentUserHost}
+              value={coolerNoteInput}
+              onChangeText={setCoolerNoteInput}
+            />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.inputLbl}>Gate / Access PIN</Text>
+            <TextInput
+              style={styles.input}
+              editable={isCurrentUserHost}
+              value={accessPinInput}
+              onChangeText={setAccessPinInput}
+            />
+          </View>
+        </View>
       </View>
 
       {/* Master Wholesale Purchase Order Manifest */}
@@ -469,6 +661,8 @@ export const HostOrderSheetView: React.FC<Props> = ({
                   styles.smallStatusChip,
                   b.paidStatus === 'paid'
                     ? styles.chipGreen
+                    : b.paidStatus === 'stripe_authorized'
+                    ? styles.chipPurple
                     : styles.chipAmber,
                 ]}
                 onPress={() => onTogglePaidStatus(b.userId)}
@@ -479,10 +673,16 @@ export const HostOrderSheetView: React.FC<Props> = ({
                     styles.smallChipText,
                     b.paidStatus === 'paid'
                       ? styles.chipTextGreen
+                      : b.paidStatus === 'stripe_authorized'
+                      ? styles.chipTextPurple
                       : styles.chipTextAmber,
                   ]}
                 >
-                  {b.paidStatus === 'paid' ? '✓ Paid' : 'Unpaid'}
+                  {b.paidStatus === 'paid'
+                    ? '✓ Paid'
+                    : b.paidStatus === 'stripe_authorized'
+                    ? '💳 Hold Ready'
+                    : 'Unpaid'}
                 </Text>
               </TouchableOpacity>
 
@@ -612,13 +812,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    gap: 8,
   },
-  rerunHint: {
+  importShortcutBtn: {
+    backgroundColor: '#0F172A',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  importShortcutText: {
     fontSize: 11,
-    fontWeight: '600',
-    color: '#334155',
-    flex: 1,
-    paddingRight: 8,
+    fontWeight: '800',
+    color: '#5EEAD4',
   },
   rerunBtn: {
     backgroundColor: '#FFFFFF',
@@ -632,6 +837,43 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
     color: '#0F766E',
+  },
+  stripeCaptureCard: {
+    backgroundColor: '#EEF2FF',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+  },
+  stripeBadge: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#4338CA',
+    letterSpacing: 0.5,
+    marginBottom: 3,
+  },
+  stripeTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#1E1B4B',
+  },
+  stripeSub: {
+    fontSize: 11,
+    color: '#3730A3',
+    marginTop: 3,
+    lineHeight: 16,
+  },
+  captureAllBtn: {
+    backgroundColor: '#4F46E5',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 10,
+  },
+  captureAllBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
   },
   partialAlertCard: {
     backgroundColor: '#FAF5FF',
@@ -728,6 +970,19 @@ const styles = StyleSheet.create({
     marginTop: 3,
     lineHeight: 16,
   },
+  ocrScanButton: {
+    backgroundColor: '#F3E8FF',
+    borderWidth: 1,
+    borderColor: '#D8B4FE',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 9,
+  },
+  ocrScanButtonText: {
+    color: '#6B21A8',
+    fontSize: 11,
+    fontWeight: '800',
+  },
   trueUpItemRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -811,6 +1066,32 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     color: '#0F766E',
+  },
+  porchStatusRow: {
+    flexDirection: 'row',
+    gap: 6,
+    marginTop: 10,
+  },
+  porchStatusBtn: {
+    flex: 1,
+    backgroundColor: '#F1F5F9',
+    paddingVertical: 8,
+    borderRadius: 8,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  porchStatusBtnActive: {
+    backgroundColor: '#0D9488',
+    borderColor: '#0D9488',
+  },
+  porchStatusBtnText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#475569',
+  },
+  porchStatusBtnTextActive: {
+    color: '#FFFFFF',
   },
   manifestSupplier: {
     fontSize: 16,
@@ -949,6 +1230,9 @@ const styles = StyleSheet.create({
   chipGreen: {
     backgroundColor: '#DCFCE7',
   },
+  chipPurple: {
+    backgroundColor: '#EDE9FE',
+  },
   chipAmber: {
     backgroundColor: '#FEF3C7',
   },
@@ -964,6 +1248,9 @@ const styles = StyleSheet.create({
   },
   chipTextGreen: {
     color: '#15803D',
+  },
+  chipTextPurple: {
+    color: '#6D28D9',
   },
   chipTextAmber: {
     color: '#B45309',

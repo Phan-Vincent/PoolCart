@@ -347,6 +347,7 @@ export const INITIAL_POOLS: GroupBuyPool[] = [
     hostName: 'Maya Lin',
     hostVenmoHandle: 'Maya-Lin-Coop',
     neighborhood: 'Victoria Gardens • 0.4 mi away',
+    distanceMiles: 0.4,
     pickupAddress: '7820 Monet Ave (Front Porch Cooler Drop)',
     pickupWindow: 'Sat, Nov 14 • 9:00 AM – 12:00 PM',
     cutoffTime: 'Thu, Nov 12 at 8:00 PM',
@@ -354,6 +355,14 @@ export const INITIAL_POOLS: GroupBuyPool[] = [
     deliveryFee: 24,
     freeDeliveryThreshold: 300,
     status: 'open',
+    porchCheckIn: {
+      status: 'waiting_delivery',
+      coolerLocationNote:
+        'Blue Yeti cooler on covered front porch by the planter box.',
+      accessCodeOrPin: 'Gate #1492',
+      photoLabel: '📸 Front Porch Cooler Drop Zone',
+      updatedAt: '6:15 PM',
+    },
     participants: [
       {
         id: 'u_maya',
@@ -383,7 +392,8 @@ export const INITIAL_POOLS: GroupBuyPool[] = [
         neighborhood: 'Terra Vista',
         avatarColor: '#7C3AED',
         verifiedAuth: true,
-        paidStatus: 'pending',
+        paidStatus: 'stripe_authorized',
+        stripeHoldId: 'pi_3QPoolCartHold01',
         pickedUp: false,
       },
       CURRENT_USER,
@@ -530,6 +540,7 @@ export const INITIAL_POOLS: GroupBuyPool[] = [
     hostName: 'Kevin Pham',
     hostVenmoHandle: 'Kevin-Pham-88',
     neighborhood: 'Terra Vista • 1.1 mi away',
+    distanceMiles: 1.1,
     pickupAddress: '10940 Church St (Garage Pickup)',
     pickupWindow: 'Sun, Nov 15 • 4:00 PM – 7:00 PM',
     cutoffTime: 'Fri, Nov 13 at 6:00 PM',
@@ -537,6 +548,14 @@ export const INITIAL_POOLS: GroupBuyPool[] = [
     deliveryFee: 20,
     freeDeliveryThreshold: 300,
     status: 'open',
+    porchCheckIn: {
+      status: 'waiting_delivery',
+      coolerLocationNote:
+        'Insulated commercial totes inside open right-side garage bay.',
+      accessCodeOrPin: 'Driveway Open',
+      photoLabel: '📸 Garage Pickup Sorting Table',
+      updatedAt: '5:20 PM',
+    },
     participants: [
       {
         id: 'u_kevin',

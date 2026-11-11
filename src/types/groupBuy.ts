@@ -46,6 +46,16 @@ export interface ReceiptTrueUp {
   reconciledAt?: string;
 }
 
+export interface PorchDropCheckIn {
+  status: 'waiting_delivery' | 'sorting' | 'ready_on_porch';
+  coolerLocationNote: string;
+  accessCodeOrPin?: string;
+  photoLabel?: string;
+  updatedAt?: string;
+}
+
+export type PaidStatus = 'pending' | 'stripe_authorized' | 'paid';
+
 export interface Participant {
   id: string;
   name: string;
@@ -54,7 +64,9 @@ export interface Participant {
   avatarColor: string;
   isHost?: boolean;
   verifiedAuth?: boolean;
-  paidStatus: 'pending' | 'paid';
+  paidStatus: PaidStatus;
+  stripeHoldId?: string;
+  stripeAuthorizedAmount?: number;
   pickedUp?: boolean;
 }
 
@@ -152,6 +164,7 @@ export interface GroupBuyPool {
   hostName: string;
   hostVenmoHandle?: string;
   neighborhood: string;
+  distanceMiles?: number; // e.g. 0.4 or 1.1 for neighborhood radius filtering
   pickupAddress: string;
   pickupWindow: string;
   cutoffTime: string;
@@ -160,6 +173,7 @@ export interface GroupBuyPool {
   freeDeliveryThreshold: number;
   status: PoolStatus;
   trueUp?: ReceiptTrueUp;
+  porchCheckIn?: PorchDropCheckIn;
   participants: Participant[];
   items: CatalogItem[];
   wishlist?: WishlistRequest[];
@@ -177,7 +191,8 @@ export interface UserCostBreakdown {
   netTrueUpDelta: number; // Difference vs initial pre-receipt estimate
   totalEstimatedSavings: number;
   totalDue: number;
-  paidStatus: 'pending' | 'paid';
+  paidStatus: PaidStatus;
+  stripeHoldId?: string;
   pickedUp?: boolean;
   lineItems: {
     itemId: string;
