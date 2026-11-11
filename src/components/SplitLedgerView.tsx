@@ -13,12 +13,14 @@ import { getParticipantBreakdowns } from '../utils/calculations';
 interface Props {
   pool: GroupBuyPool;
   currentUserId: string;
+  isCurrentUserHost: boolean;
   onTogglePaidStatus: (userId: string) => void;
 }
 
 export const SplitLedgerView: React.FC<Props> = ({
   pool,
   currentUserId,
+  isCurrentUserHost,
   onTogglePaidStatus,
 }) => {
   const breakdowns = getParticipantBreakdowns(pool);
@@ -47,7 +49,6 @@ export const SplitLedgerView: React.FC<Props> = ({
       } else {
         await Linking.openURL(venmoWebFallback);
       }
-      // Also offer to mark as paid
       if (pool.participants.find((p) => p.id === userId)?.paidStatus !== 'paid') {
         onTogglePaidStatus(userId);
       }
@@ -73,6 +74,11 @@ export const SplitLedgerView: React.FC<Props> = ({
             ? '🔒 Pool Locked — Ready for Settlement & Pickup'
             : `Order Cutoff: ${pool.cutoffTime}`}
         </Text>
+        {pool.trueUp?.reconciledAt && (
+          <Text style={styles.trueUpBannerNote}>
+            🧾 Receipt True-Up Applied ({pool.trueUp.reconciledAt}): "{pool.trueUp.receiptNote}"
+          </Text>
+        )}
       </View>
 
       <Text style={styles.sectionHeader}>
@@ -81,6 +87,9 @@ export const SplitLedgerView: React.FC<Props> = ({
 
       {breakdowns.map((b) => {
         const isMe = b.userId === currentUserId;
+        const canTogglePaid = isCurrentUserHost || isMe;
+        const hasTrueUpDelta = Math.abs(b.netTrueUpDelta) >= 0.01;
+
         return (
           <View
             key={b.userId}
@@ -109,8 +118,10 @@ export const SplitLedgerView: React.FC<Props> = ({
                   b.paidStatus === 'paid'
                     ? styles.paidChipGreen
                     : styles.paidChipAmber,
+                  !canTogglePaid && { opacity: 0.5 },
                 ]}
                 onPress={() => onTogglePaidStatus(b.userId)}
+                disabled={!canTogglePaid}
               >
                 <Text
                   style={[
@@ -132,32 +143,42 @@ export const SplitLedgerView: React.FC<Props> = ({
               </Text>
             ) : (
               <View style={styles.itemsList}>
-                {b.lineItems.map((li) => (
-                  <View key={li.itemId} style={styles.lineItemRow}>
-                    <View style={styles.lineItemLeft}>
-                      <Text style={styles.lineItemTitle}>
-                        {li.emoji} {li.itemName} (×{li.quantity})
-                      </Text>
-                      {li.isCaseSplit && (
-                        <Text
-                          style={[
-                            styles.caseSubNote,
-                            li.caseFilled
-                              ? { color: '#15803D' }
-                              : { color: '#9333EA' },
-                          ]}
-                        >
-                          {li.caseFilled
-                            ? '✓ Case filled'
-                            : `⏳ Waiting for case to fill (${li.caseProgressText})`}
+                {b.lineItems.map((li) => {
+                  const priceAdjusted =
+                    li.effectiveUnitPrice !== li.quotedUnitPrice;
+                  return (
+                    <View key={li.itemId} style={styles.lineItemRow}>
+                      <View style={styles.lineItemLeft}>
+                        <Text style={styles.lineItemTitle}>
+                          {li.emoji} {li.itemName} (×{li.quantity})
                         </Text>
-                      )}
+                        {priceAdjusted && (
+                          <Text style={styles.trueUpPriceSub}>
+                            🧾 Receipt price: ${li.effectiveUnitPrice.toFixed(2)}/unit
+                            (was ${li.quotedUnitPrice.toFixed(2)})
+                          </Text>
+                        )}
+                        {li.isCaseSplit && (
+                          <Text
+                            style={[
+                              styles.caseSubNote,
+                              li.caseFilled
+                                ? { color: '#15803D' }
+                                : { color: '#9333EA' },
+                            ]}
+                          >
+                            {li.caseFilled
+                              ? '✓ Case filled'
+                              : `⏳ Waiting for case to fill (${li.caseProgressText})`}
+                          </Text>
+                        )}
+                      </View>
+                      <Text style={styles.lineItemPrice}>
+                        ${li.subtotal.toFixed(2)}
+                      </Text>
                     </View>
-                    <Text style={styles.lineItemPrice}>
-                      ${li.subtotal.toFixed(2)}
-                    </Text>
-                  </View>
-                ))}
+                  );
+                })}
 
                 <View style={styles.feeRow}>
                   <Text style={styles.feeLabel}>Shared Wholesale Delivery</Text>
@@ -168,8 +189,28 @@ export const SplitLedgerView: React.FC<Props> = ({
                   </Text>
                 </View>
 
+                {b.proRataTaxOrAdjustment !== 0 && (
+                  <View style={styles.feeRow}>
+                    <Text style={styles.feeLabel}>
+                      Pro-Rata Receipt Tax / CRV / Weight Adj.
+                    </Text>
+                    <Text style={styles.feeValue}>
+                      ${b.proRataTaxOrAdjustment.toFixed(2)}
+                    </Text>
+                  </View>
+                )}
+
                 <View style={styles.totalRow}>
-                  <Text style={styles.totalLabel}>Total Pool Share</Text>
+                  <View>
+                    <Text style={styles.totalLabel}>Total Pool Share</Text>
+                    {hasTrueUpDelta && (
+                      <Text style={styles.deltaSubNote}>
+                        {b.netTrueUpDelta < 0
+                          ? `↓ $${Math.abs(b.netTrueUpDelta).toFixed(2)} lower after receipt true-up`
+                          : `↑ +$${b.netTrueUpDelta.toFixed(2)} after receipt true-up`}
+                      </Text>
+                    )}
+                  </View>
                   <Text style={styles.totalValue}>
                     ${b.totalDue.toFixed(2)}
                   </Text>
@@ -226,6 +267,12 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#B45309',
     marginTop: 6,
+  },
+  trueUpBannerNote: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#0F766E',
+    marginTop: 4,
   },
   sectionHeader: {
     fontSize: 11,
@@ -325,6 +372,12 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#334155',
   },
+  trueUpPriceSub: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#0D9488',
+    marginTop: 2,
+  },
   caseSubNote: {
     fontSize: 11,
     fontWeight: '600',
@@ -355,6 +408,7 @@ const styles = StyleSheet.create({
   totalRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    alignItems: 'center',
     marginTop: 8,
     paddingTop: 8,
     borderTopWidth: 1,
@@ -364,6 +418,12 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '800',
     color: '#0F172A',
+  },
+  deltaSubNote: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#0D9488',
+    marginTop: 1,
   },
   totalValue: {
     fontSize: 16,

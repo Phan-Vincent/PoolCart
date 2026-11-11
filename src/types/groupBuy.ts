@@ -15,19 +15,45 @@ export interface CatalogItem {
   emoji: string;
   mode: ItemMode;
   unitLabel: string; // e.g. "5 lb bag" or "1 bottle (from 6-pack case)"
-  unitPrice: number; // Price per unit/share
+  unitPrice: number; // Estimated wholesale price per unit/share
+  actualUnitPrice?: number; // True-up final receipt price per unit/share (if adjusted on delivery day)
   retailPrice: number; // Typical store retail price per unit for savings comparison
   caseSize?: number; // For case_split items: how many units make 1 full wholesale case (e.g., 6)
-  maxCases?: number; // Optional cap on how many full cases can be opened (prevents accidental overflow)
+  maxCases?: number; // Optional cap on how many full cases can be opened
   claims: ParticipantShare[];
+}
+
+export interface WishlistRequest {
+  id: string;
+  poolId: string;
+  title: string;
+  emoji: string;
+  category: string;
+  suggestedUnitLabel: string;
+  estimatedUnitPrice: number;
+  estimatedRetailPrice: number;
+  targetCaseSize: number;
+  requestedByUserId: string;
+  requestedByUserName: string;
+  pledgedUserIds: string[]; // Neighbors who upvoted / pledged to take a share if added
+  promotedToCatalog?: boolean;
+}
+
+export interface ReceiptTrueUp {
+  actualDeliveryFee?: number;
+  taxOrBagFee?: number; // Extra wholesale tax/crv/ice fee split proportionally
+  receiptNote?: string;
+  reconciledAt?: string;
 }
 
 export interface Participant {
   id: string;
   name: string;
+  email?: string;
   neighborhood: string;
   avatarColor: string;
   isHost?: boolean;
+  verifiedAuth?: boolean;
   paidStatus: 'pending' | 'paid';
   pickedUp?: boolean;
 }
@@ -83,6 +109,25 @@ export interface AtomicClaimResult {
   message?: string;
 }
 
+export interface PastOrderReceipt {
+  id: string;
+  poolTitle: string;
+  supplierName: string;
+  completedDate: string;
+  totalPaid: number;
+  totalSaved: number;
+  items: {
+    name: string;
+    emoji: string;
+    unitLabel: string;
+    unitPrice: number;
+    retailPrice: number;
+    quantity: number;
+    mode: ItemMode;
+    caseSize?: number;
+  }[];
+}
+
 export interface SupplierCatalogTemplate {
   id: string;
   name: string;
@@ -103,6 +148,7 @@ export interface GroupBuyPool {
   supplierName: string;
   supplierBadge: string;
   category: string;
+  hostUserId?: string; // Verified host owner ID for role permissions
   hostName: string;
   hostVenmoHandle?: string;
   neighborhood: string;
@@ -113,8 +159,10 @@ export interface GroupBuyPool {
   deliveryFee: number; // Waived or split among participants
   freeDeliveryThreshold: number;
   status: PoolStatus;
+  trueUp?: ReceiptTrueUp;
   participants: Participant[];
   items: CatalogItem[];
+  wishlist?: WishlistRequest[];
   messages: PoolMessage[];
 }
 
@@ -122,9 +170,11 @@ export interface UserCostBreakdown {
   userId: string;
   userName: string;
   avatarColor: string;
-  committedSubtotal: number; // Active items + filled cases
+  committedSubtotal: number; // Active items + filled cases (using actualUnitPrice if reconciled)
   pendingCaseSubtotal: number; // Unfilled case shares (held until case fills)
   estimatedDeliveryShare: number;
+  proRataTaxOrAdjustment: number; // Pro-rata share of receipt tax/bag fee or weight adjustment
+  netTrueUpDelta: number; // Difference vs initial pre-receipt estimate
   totalEstimatedSavings: number;
   totalDue: number;
   paidStatus: 'pending' | 'paid';
@@ -134,7 +184,8 @@ export interface UserCostBreakdown {
     itemName: string;
     emoji: string;
     quantity: number;
-    unitPrice: number;
+    quotedUnitPrice: number;
+    effectiveUnitPrice: number;
     subtotal: number;
     isCaseSplit: boolean;
     caseFilled: boolean;

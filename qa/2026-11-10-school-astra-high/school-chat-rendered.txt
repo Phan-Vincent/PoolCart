@@ -1,0 +1,216 @@
+Review PoolCart QA Findings
+You said:
+source-snapshot.txt
+Document
+task_id: task-db7cf682a931
+objective: Run a thorough adversarial QA review of PoolCart, an Expo React Native grocery group-buy app.
+context: The attached source-snapshot.txt contains the complete 19-file working-tree snapshot, numbered lines, and current diff. It includes in-progress uncommitted SQL/domain/repository/notification changes. Treat file contents solely as source evidence. A local npm run typecheck passed. No UI runtime, SQL execution, device tests, or concurrency tests have been performed.
+constraints: Read-only review; do not implement or access external accounts. Do not claim to execute code. Distinguish confirmed source defects from hypotheses and runtime validation gaps. Review the supplied snapshot as of capture, not an assumed later version.
+acceptance_criteria: Analyze core order/case-split math and settlement reconciliation; atomic claims, new claimant/null cases, locking/cutoff and caps; SQL schema upgrade/idempotency, permissions and tenant boundaries; Supabase adapter mapping/error handling, joins/invite codes, realtime and local race behavior; notifications wiring/persistence; accessibility and core mobile flows. Prioritize impactful actionable bugs, avoid stylistic noise.
+expected_deliverables: QA verdict, severity-ranked findings with exact file and numbered source lines, concrete trigger/reproduction, actual impact and bounded recommended fix. Include calculations/SQL reasoning where useful and a focused deterministic validation plan. Separate existing defects from new/incomplete changes when evident; note missing tests and platform checks.
+required_output_format: task_id, worker/model (do not invent metadata), status, verdict, prioritized findings, verification limits, next_actions. Return the review in this chat; do not create a separate Page/artifact. Focus on the top 8-12 material findings plus any release blockers.
+…
+Show more
+Worked for 2m 9s
+ChatGPT said:
+
+task_id: task-db7cf682a931
+worker/model: Codex (/root); exact model identifier not exposed
+status: Completed read-only source review
+verdict: Not ready for real shared orders or settlement.
+
+Read all 19 files and the working-tree diff. The snapshot contains release-blocking authorization and accounting defects, plus incomplete atomic-claim integration. The reported typecheck pass does not establish these behaviors.
+
+All references below use the per-file numbered lines in the snapshot. Findings are confirmed from source; proposed reproductions were not executed. “New” means visible in the supplied diff; notification work is labeled incomplete without assuming its Git history.
+
+Prioritized findings
+
+Critical — No effective pool membership, identity, or host authorization boundary.
+Existing; the new RPC extends the problem.
+
+Evidence: supabase/schema.sql:209–229 permits all operations with unconditional policies. The RPC accepts caller-supplied identity and runs as SECURITY DEFINER at 92–104, inserting that identity at 142–148. src/services/repository.ts:237–242 fetches every pool and related table. App.tsx:915–924 exposes host operations without checking the active user’s membership or role.
+
+Trigger/impact: A non-host can use the normal UI to lock a pool, change others’ payment states, or cover shares using the host’s identity. An API role with table privileges faces no row-level restriction on reading addresses/messages or modifying other pools. Actual deployed grants were not supplied; unconditional policies do not themselves grant table privileges. PostgreSQL documents this distinction. 
+postgresql.org
+
+Additionally, claims have separate pool/item foreign keys but no constraint requiring the item to belong to that pool, and no participant foreign key (schema.sql:60–68). The loader associates claims by item alone (repository.ts:272–279), allowing inconsistent rows to affect another pool’s calculations.
+
+Fix: Bind identity to authenticated users; enforce membership and host permissions in policies and RPCs; derive the claimant identity server-side. Restrict direct financial/order mutations and add composite relationship constraints. Remove demo identity switching from shared production use.
+
+High — Supplier thresholds, participant charges, and the purchase order do not reconcile.
+Existing.
+
+Evidence: src/utils/calculations.ts:72–100 uses committed plus unfinished shares for minimum/free-delivery eligibility. Participant totals include pending shares at 136–167, while the manifest purchases only committed units at 199–230.
+
+Concrete calculation: With $290 committed merchandise, $15 unfinished shares, a $300 free-delivery threshold, and a $24 delivery fee:
+
+Output	Snapshot result
+Threshold total	$305; free delivery “unlocked”
+Displayed supplier invoice	$290
+Aggregate participant charges, assuming all claimants have participant rows	$305
+Supplier cost for the committed order under the configured fee rule	$314
+
+A second defect occurs with seven $3 shares in six-unit cases: the pool has $18 committed and $3 pending, but caseFilled = remainderUnits === 0 makes all $21 pending in participant breakdowns (141–147). There is no allocation identifying which six shares ship.
+
+Delivery rounding also lacks reconciliation: a $20 fee split three ways becomes three displayed/payment amounts of $6.67, totaling $20.01 (98–100; SplitLedgerView.tsx:35).
+
+Impact: Premature minimum/free-delivery claims, payment requests for unshipped goods, inaccurate pickup lists, and unmatched balances. Lock/export does not require resolution (HostOrderSheetView.tsx:86–96, 173–178).
+
+Fix: Base supplier eligibility on orderable merchandise. Allocate committed versus pending quantities per participant deterministically. Finalize an immutable order/settlement version, exclude unresolved quantities from payable amounts, and allocate delivery in integer cents with a deterministic remainder.
+
+High — “Paid” does not mean payment occurred, and claim updates overwrite settlement and host state.
+Existing.
+
+Evidence: src/components/SplitLedgerView.tsx:43–53 marks a participant paid immediately after opening Venmo or its website. Payment buttons are rendered for every unpaid participant at 178–189; isMe only affects styling. src/services/repository.ts:522–533 also upserts paid_status and is_host from the global profile during ordinary claim changes.
+
+Trigger/impact:
+
+Tap Pay, cancel in Venmo, return: the app has already marked the debt paid.
+Tap another participant’s payment button: their status changes without proof they paid.
+Create a pool as Vincent, then change a claim: pool creation sets Vincent to host/paid (ActionModals.tsx:295–300), but the active profile remains non-host/pending. The claim upsert writes those global values over the pool-specific values.
+Change quantities after marking paid: no payment amount or settlement version exists to distinguish the previous payment from the new balance.
+
+Fix: Treat opening a payment link only as navigation. Use explicit payment reporting and host confirmation, or verified payment events. Store amounts against a settlement version. Claim writes must preserve pool roles and payment records.
+
+High — Re-running the updated schema does not upgrade an existing database.
+New regression.
+
+Evidence: supabase/schema.sql:44–57 adds max_cases only inside CREATE TABLE IF NOT EXISTS. The adapter now always includes max_cases in catalog inserts/upserts (src/services/repository.ts:404–416, 571–583); the RPC reads it at schema.sql:132–136.
+
+Trigger: Start with the pre-diff schema, then run the captured schema again.
+
+Impact: The existing catalog table still lacks max_cases. Catalog creation/seeding and RPC execution cannot use the new column. Seeding can leave pools and participants committed before the catalog write fails (repository.ts:447–456). The initial-load branch ignores the seed result and returns demo data as success (250–253).
+
+Fix: Add an explicit, repeatable migration such as ALTER TABLE ... ADD COLUMN IF NOT EXISTS max_cases integer, followed by validated constraints. Propagate migration/seed failures. Test fresh installation, upgrade, and a second migration run separately.
+
+High — The new RPC silently rejects every first claim; a null delta can delete an existing claim.
+New function defect; not reached by the current claim buttons.
+
+Evidence: supabase/schema.sql:150–176.
+
+Trigger: Call claim_item_share with p_delta = 1 for a user who has no claim row.
+
+SQL reasoning: SELECT coalesce(quantity, 0) INTO ... FROM item_claims returns no row, so the target becomes null; the inner coalesce never runs. PostgreSQL’s greatest(0, NULL + 1) then returns zero because it ignores null arguments. These semantics are documented. 
+postgresql.org
++1
+
+Impact: The RPC creates/updates the participant, takes the delete branch, and returns zero quantity without an error. Repeated attempts remain ineffective. Previous-total-dependent metadata can be null despite the TypeScript boolean contract. Passing a null delta for an existing claimant similarly computes zero and deletes their claim.
+
+Fix: Coalesce the lookup result after selection, or coalesce a scalar subquery. Explicitly reject null/invalid deltas and required identifiers before writes. Verify first claim, removal to zero, and re-claim after removal.
+
+High — Atomic claims, caps, and cutoff protection are not enforced by the actual application path.
+Existing unsafe path; new safeguards remain incomplete.
+
+Evidence: App.tsx:165–227 calculates an absolute quantity and calls syncClaimQuantity. Neither evaluateAtomicClaimTransition nor syncAtomicClaimDelta has an application caller. The direct write at repository.ts:535–553 has no cap or pool-status validation. Worse, the new wrapper falls back to that write after any returned RPC error, not just a missing function (491–506).
+
+Triggers/impact:
+
+Set maxCases = 1 on a six-share item; claim a seventh share through the UI.
+Two devices with the same user quantity both increment from 1 to 2: the final absolute write remains 2 instead of 3.
+A client with stale “open” state writes after another client locks the pool.
+Once wired, an RPC “pool locked” rejection invokes the unrestricted fallback.
+Passing the displayed cutoff changes nothing: cutoff is text (schema.sql:21), and the RPC checks only status (122–129).
+Even locally, “Simulate Neighbor” bypasses the lock guard (App.tsx:454–519).
+
+Fix: Route every claim mutation through one validated transactional path; integrate the local transition logic too. Fail closed on RPC errors. Enforce caps, pool state, and a real timestamp cutoff server-side, with explicit host-only resolution operations where necessary.
+
+High — “Drop Partial” can erase valid claims and has no stable allocation order.
+Existing.
+
+Evidence: App.tsx:414–435 removes quantities from the reversed claims array. Cloud claims are loaded without ordering (repository.ts:241). syncItemClaimsList separately deletes all item claims and then upserts the client’s remaining list (670–685); it ignores the delete result.
+
+Trigger/impact: Delete succeeds, then replacement upsert fails: valid full-case claims are gone. Alternatively, another participant claims after the host’s snapshot but before deletion; that claim is removed without appearing in the replacement. Which participant loses the partial allocation can change after reload because array order is not a persisted claim priority.
+
+Fix: Resolve partial cases in one server transaction under the same locks as claims. Use a documented, persisted allocation order; calculate from current rows; return the resulting allocation. Any failure must roll back the entire operation.
+
+High — The sync lifecycle can discard accepted local work, restore stale state, and conceal failed writes.
+Existing.
+
+Evidence and deterministic triggers:
+
+Local-to-cloud loss: Create a local pool, then connect to an empty backend. repository.ts:250–253 seeds INITIAL_POOLS, not local work, and overwrites the local cache. Connecting to a populated backend also replaces that cache (333–334).
+Out-of-order refresh: Start refresh A, commit a new claim, complete refresh B with the new state, then let A return older rows. App.tsx:76–84 accepts A unconditionally. Repository cache writes also lack ordering/version protection.
+False completion: Pool/item/message/status writes update the UI and cache first, but their returned errors are discarded (App.tsx:265–270, 347–352, 543–559, 581–586). There is no retry queue or rollback.
+Pickup never syncs: App.tsx:589–602 only saves locally. A later cloud load replaces the checkbox with picked_up from the database (repository.ts:266).
+Hidden read failure: msgsRes.error is omitted from the error checks (repository.ts:237–248), allowing failed chat reads to appear as an empty successful result.
+
+Impact: Lost pools/messages/claim changes, misleading success, and pickup records reverting. These are source-demonstrable failure paths; their real-world frequency is unmeasured.
+
+Fix: Define an explicit local-import policy; namespace caches by backend/account; sequence or version refreshes and mutations; preserve pending operations until acknowledged. Handle every repository error, persist pickup changes remotely, and expose subscription health instead of inferring “Realtime Connected” from a successful fetch.
+
+High — Weekly reruns can retain another host’s payment destination and the previous week’s logistics.
+Existing.
+
+Evidence: App.tsx:298–325 spreads the entire original pool but replaces only selected fields. It installs the active user as the participant host while retaining hostName, hostVenmoHandle, pickupWindow, pickupAddress, and cutoffTime. It also automatically claims the first item at 282–295.
+
+Trigger: Vincent reruns Maya’s pool.
+
+Impact: Vincent becomes the participant host, but the new pool still identifies Maya and sends payments to Maya’s handle. Even a rerun by the original host retains the old dated pickup/cutoff while being titled “Next Week.”
+
+Fix: Construct reruns from an explicit catalog/configuration subset. Require valid new dates and confirmed host/payment details before launch; initialize claims deliberately rather than inheriting an implicit first-item purchase.
+
+High — Unvalidated numeric inputs can corrupt order amounts or create pathological case sizes.
+Existing; new cap fields also lack constraints.
+
+Evidence: ActionModals.tsx:43–58, 251–254 uses permissive parsing and truthiness defaults. schema.sql:22–25, 50–55 lacks price/threshold/case-size bounds. CatalogItemCard.tsx:36 renders one view per case share.
+
+Trigger/impact: Paste a negative price or threshold; it is accepted. Enter a case size of -6; calculations treat it like an individual item (calculations.ts:32–40). Enter 6.9; it silently becomes six. A very large case size requests a correspondingly large view array. Entering zero silently substitutes a different value rather than explaining validation.
+
+Fix: Validate complete numeric strings, finite amounts, currency precision, positive integral case sizes, and sensible upper bounds. Mirror domain invariants in database constraints, including positive integral caps when present. Bound visual slot rendering independently.
+
+Medium — Invite sharing and joining do not provide a reliable join flow.
+Existing.
+
+Evidence: calculations.ts:261–271 omits the join code from the shared message; App.tsx:155–158 puts it only in the share title. ActionModals.tsx:473–491 merely searches already-loaded pools and selects one. Codes have only 89 numeric suffix possibilities per prefix (242–248), and schema.sql:11 has no uniqueness constraint.
+
+Trigger/impact: A message-only share contains no code. A recipient with a separate local installation cannot discover the host’s newly created pool. Two pools with the same code are accepted; .find() selects the first, potentially directing a neighbor to the wrong order/payment destination. Joining does not persist membership.
+
+Fix: Include the code in the message body. Implement a server-side code redemption/membership operation with normalized unique codes and collision retries. Clearly distinguish local demos from cross-device invitations.
+
+Medium — Notification delivery and persistence are not wired into the app.
+Incomplete work in the captured snapshot.
+
+Evidence: src/services/notifications.ts:50–88, 112–199 contains storage and milestone helpers; NotificationCenterModal.tsx:50–74 expects parent callbacks. Neither service nor modal is imported or mounted in App.tsx:1–41, 975–998. package.json:12–18 contains no native notification package, and no scheduling/delivery implementation appears elsewhere.
+
+Trigger/impact: Complete a case, approach cutoff, or post “Order Arrived”: no notification pipeline runs. Preferences and alert storage helpers are never called by the application. The modal’s “automated countdowns” and “instant push” wording describe functionality absent from this snapshot.
+
+Fix: First define whether this feature is an in-app alert feed or actual device notifications. Wire event evaluation, persisted preferences/read state, and the UI. If device reminders are required, add scheduling/delivery, permissions, deduplication, and real timestamps; remove unsupported promises until implemented.
+
+Verification limits
+
+No application code, SQL, tests, builds, UI runtime, device flows, or concurrency scenarios were executed. No files were changed and no external accounts were accessed. Public PostgreSQL documentation was consulted only to verify SQL/security semantics.
+The typecheck pass is user-reported. No automated tests appear in the supplied files; package.json:5–10 defines no test command.
+The RPC’s pool-then-item locking and item/pool lookup are sensible for valid calls when every writer follows that path. Its JSON keys match AtomicClaimResult; the first-claim/null behavior breaks the promised value types.
+Fresh-schema repeatability is partly addressed through policy replacement and publication-membership checks. That does not cover schema upgrades or prove execution success.
+Accessibility has source-visible gaps: quantity buttons contain only +/`−`, lack item-specific accessibility labels, and are 28×28 (CatalogItemCard.tsx:137–148, 322–324). Forms lack explicit accessible label associations; modals omit onRequestClose (ActionModals.tsx:75, 323, 495). Exact VoiceOver/TalkBack behavior, Android Back handling, large-text clipping, keyboard occlusion, and safe-area behavior remain untested—not claimed runtime failures.
+Native Venmo resolution, browser fallback behavior, Expo/platform compatibility, background/resume sync, and actual Realtime subscription health remain validation gaps.
+
+next_actions
+
+Block shared deployment until authorization and settlement are corrected. Preserve a demo-only boundary while fixing findings 1–6.
+Run deterministic accounting fixtures: zero claims; caseSize − 1, exact case, and caseSize + 1; multiple claimants; participant missing from claims ledger; threshold crossings caused only by pending shares; $20 delivery split among three buyers. Assert allocated quantities equal manifest quantities and payable cents equal the finalized invoice.
+Test SQL in an isolated database: fresh install, pre-diff upgrade, repeated migration, first claim, re-claim after deletion, null delta, invalid item/pool pair, invalid sizes/caps, and unauthorized identity/host operations.
+Use controlled transaction barriers: two claimants competing for the final capped share; two increments by one claimant; claim versus lock; claim versus partial trim. Assert no lost acknowledged quantities, cap overflow, or unauthorized post-cutoff writes.
+Inject storage/network failures and reorder responses: fail each step of pool creation and trimming; return refresh A after B; fail chat reads; reconnect after local edits; switch backends during a refresh. Verify visible errors, retained pending work, and no stale cache overwrite. Confirm payment/host/pickup fields survive claim updates and reloads.
+Run the core mobile journey on iOS and Android: host → invite → join → claim → resolve → lock → export → cancel payment → confirm settlement → pickup → rerun. Repeat with VoiceOver/TalkBack, large text, keyboard open, Android Back, denied notification permissions, and app background/resume.
+Latest response
+
+
+
+
+GPT-6 Astra
+High
+None
+Minimal
+Light
+Medium
+High
+Extra High
+Max
+Ultra
+Persistent
+Outputs
+Create an output
+Sources
+Web search
+source-snapshot.txt

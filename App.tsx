@@ -8,8 +8,13 @@ import {
   TouchableOpacity,
   StatusBar,
   Share,
+  TextInput,
 } from 'react-native';
-import { CURRENT_USER, INITIAL_POOLS } from './src/data/mockPools';
+import {
+  CURRENT_USER,
+  INITIAL_POOLS,
+  PAST_USER_RECEIPTS,
+} from './src/data/mockPools';
 import {
   AtomicClaimResult,
   CatalogItem,
@@ -17,8 +22,11 @@ import {
   NotificationPreferences,
   Participant,
   ParticipantShare,
+  PastOrderReceipt,
   PoolMessage,
   PoolNotificationAlert,
+  ReceiptTrueUp,
+  WishlistRequest,
 } from './src/types/groupBuy';
 import {
   DEMO_PROFILES,
@@ -42,6 +50,8 @@ import { CatalogItemCard } from './src/components/CatalogItemCard';
 import { SplitLedgerView } from './src/components/SplitLedgerView';
 import { HostOrderSheetView } from './src/components/HostOrderSheetView';
 import { PoolChatView } from './src/components/PoolChatView';
+import { WishlistSection } from './src/components/WishlistSection';
+import { WalletHistoryView } from './src/components/WalletHistoryView';
 import {
   AddItemModal,
   CreatePoolModal,
@@ -53,7 +63,13 @@ import {
 } from './src/components/NotificationCenterModal';
 import { SupabaseSetupCard } from './src/components/SupabaseSetupCard';
 
-type ActiveTab = 'catalog' | 'splits' | 'chat' | 'host_sheet' | 'architecture';
+type ActiveTab =
+  | 'catalog'
+  | 'splits'
+  | 'chat'
+  | 'host_sheet'
+  | 'wallet'
+  | 'architecture';
 type ItemFilter = 'all' | 'individual' | 'case_split';
 
 export default function App() {
@@ -64,6 +80,8 @@ export default function App() {
   const [activeUser, setActiveUser] = useState<Participant>(CURRENT_USER);
   const [activeTab, setActiveTab] = useState<ActiveTab>('catalog');
   const [itemFilter, setItemFilter] = useState<ItemFilter>('all');
+  const [selectedCategory, setSelectedCategory] = useState<string>('All');
+  const [searchQuery, setSearchQuery] = useState<string>('');
 
   const [showAddItemModal, setShowAddItemModal] = useState(false);
   const [showCreatePoolModal, setShowCreatePoolModal] = useState(false);
@@ -178,9 +196,42 @@ export default function App() {
   const activePool =
     pools.find((p) => p.id === selectedPoolId) || pools[0];
 
+  // Determine whether the activeUser is the verified Host of activePool
+  const isCurrentUserHost = Boolean(
+    (activePool.hostUserId && activePool.hostUserId === activeUser.id) ||
+      activePool.participants.find((p) => p.id === activeUser.id)?.isHost ||
+      activePool.hostName.toLowerCase().includes(activeUser.name.toLowerCase())
+  );
+
   const handleSelectUser = async (user: Participant) => {
     setActiveUser(user);
     await PoolRepository.saveActiveUser(user);
+  };
+
+  const handleSwitchToPoolHost = async () => {
+    const hostParticipant =
+      activePool.participants.find((p) => p.isHost) ||
+      DEMO_PROFILES.find((p) => p.id === activePool.hostUserId) ||
+      DEMO_PROFILES[1];
+    if (hostParticipant) {
+      await handleSelectUser(hostParticipant);
+    }
+  };
+
+  const handleVerifyOtpEmail = async (email: string) => {
+    const updatedUser: Participant = {
+      ...activeUser,
+      email,
+      verifiedAuth: true,
+    };
+    await handleSelectUser(updatedUser);
+    const alert = NotificationService.createAlert(
+      activePool,
+      'case_locked',
+      `🔐 Verified Neighbor Identity: ${updatedUser.name}`,
+      `Your profile (${email}) is now OTP-verified for neighborhood pools and host permissions.`
+    );
+    await pushAlerts([alert]);
   };
 
   const handleConfigSaved = async (newConfig: SupabaseConfig) => {
@@ -292,6 +343,224 @@ export default function App() {
     }
   };
 
+  /**
+   * Feature #1: Wishlist Pledges, New Split Requests & Host Promotion to Catalog
+   */
+  const handlePledgeWishlist = async (wishId: string) => {
+    const updatedPools = pools.map((pool) => {
+      if (pool.id !== activePool.id) return pool;
+      const updatedWish = (pool.wishlist || []).map((w) => {
+        if (w.id !== wishId) return w;
+        const exists = w.pledgedUserIds.includes(activeUser.id);
+        const nextPledges = exists
+          ? w.pledgedUserIds.filter((id) => id !== activeUser.id)
+          : [...w.pledgedUserIds, activeUser.id];
+        return { ...w, pledgedUserIds: nextPledges };
+      });
+      return { ...pool, wishlist: updatedWish };
+    });
+
+    setPools(updatedPools);
+    await PoolRepository.saveLocalPools(updatedPools);
+  };
+
+  const handleAddWishlistRequest = async (
+    req: Omit<WishlistRequest, 'id' | 'poolId'>
+  ) => {
+    const newWish: WishlistRequest = {
+      ...req,
+      id: `wish_${Date.now()}`,
+      poolId: activePool.id,
+    };
+
+    const updatedPools = pools.map((pool) => {
+      if (pool.id !== activePool.id) return pool;
+      return {
+        ...pool,
+        wishlist: [newWish, ...(pool.wishlist || [])],
+      };
+    });
+
+    setPools(updatedPools);
+    await PoolRepository.saveLocalPools(updatedPools);
+  };
+
+  const handlePromoteWishlistToCatalog = async (wish: WishlistRequest) => {
+    // Convert pledged user IDs into initial 1-unit claims
+    const initialClaims: ParticipantShare[] = wish.pledgedUserIds.map((uid) => {
+      const known =
+        activePool.participants.find((p) => p.id === uid) ||
+        DEMO_PROFILES.find((p) => p.id === uid);
+      return {
+        userId: uid,
+        userName: known ? known.name : 'Neighbor',
+        avatarColor: known ? known.avatarColor : '#0D9488',
+        quantity: 1,
+      };
+    });
+
+    const newItem: CatalogItem = {
+      id: `item_wish_${Date.now()}`,
+      name: wish.title,
+      category: wish.category,
+      emoji: wish.emoji,
+      mode: 'case_split',
+      unitLabel: wish.suggestedUnitLabel,
+      unitPrice: wish.estimatedUnitPrice,
+      retailPrice: wish.estimatedRetailPrice,
+      caseSize: wish.targetCaseSize,
+      claims: initialClaims,
+    };
+
+    const updatedPools = pools.map((pool) => {
+      if (pool.id !== activePool.id) return pool;
+      return {
+        ...pool,
+        items: [newItem, ...pool.items],
+        wishlist: (pool.wishlist || []).map((w) =>
+          w.id === wish.id ? { ...w, promotedToCatalog: true } : w
+        ),
+      };
+    });
+
+    setPools(updatedPools);
+    await PoolRepository.saveLocalPools(updatedPools);
+
+    const alert = NotificationService.createAlert(
+      activePool,
+      'case_locked',
+      `🎉 Wishlist Promoted: ${wish.emoji} ${wish.title}`,
+      `Host approved ${wish.title} with ${initialClaims.length}/${wish.targetCaseSize} pledged shares already claimed!`
+    );
+    await pushAlerts([alert]);
+  };
+
+  /**
+   * Feature #2: Wholesale Receipt True-Up Handlers
+   */
+  const handleUpdateItemActualPrice = async (
+    itemId: string,
+    actualPrice: number | undefined
+  ) => {
+    const updatedPools = pools.map((pool) => {
+      if (pool.id !== activePool.id) return pool;
+      return {
+        ...pool,
+        items: pool.items.map((it) =>
+          it.id === itemId ? { ...it, actualUnitPrice: actualPrice } : it
+        ),
+      };
+    });
+
+    setPools(updatedPools);
+    await PoolRepository.saveLocalPools(updatedPools);
+  };
+
+  const handleUpdateReceiptTrueUp = async (trueUp: ReceiptTrueUp) => {
+    const updatedPools = pools.map((pool) => {
+      if (pool.id !== activePool.id) return pool;
+      return {
+        ...pool,
+        trueUp,
+      };
+    });
+
+    setPools(updatedPools);
+    await PoolRepository.saveLocalPools(updatedPools);
+
+    const alert = NotificationService.createAlert(
+      activePool,
+      'minimum_met',
+      `🧾 Wholesale Receipt True-Up Reconciled!`,
+      `${activePool.title} splits have been updated against the final register receipt (${trueUp.receiptNote}).`
+    );
+    await pushAlerts([alert]);
+  };
+
+  /**
+   * Feature #3: 1-Tap Re-Claim Staples from Past Receipts
+   */
+  const handleReclaimReceiptItems = async (receipt: PastOrderReceipt) => {
+    const updatedPools = pools.map((pool) => {
+      if (pool.id !== activePool.id) return pool;
+
+      const hasParticipant = pool.participants.some(
+        (p) => p.id === activeUser.id
+      );
+      const nextParticipants = hasParticipant
+        ? pool.participants
+        : [...pool.participants, activeUser];
+
+      const nextItems = [...pool.items];
+
+      receipt.items.forEach((pastItem) => {
+        const existingIdx = nextItems.findIndex(
+          (i) => i.name.toLowerCase() === pastItem.name.toLowerCase()
+        );
+
+        if (existingIdx >= 0) {
+          const item = nextItems[existingIdx];
+          const existingClaim = item.claims.find(
+            (c) => c.userId === activeUser.id
+          );
+          const nextClaims = existingClaim
+            ? item.claims.map((c) =>
+                c.userId === activeUser.id
+                  ? { ...c, quantity: c.quantity + pastItem.quantity }
+                  : c
+              )
+            : [
+                ...item.claims,
+                {
+                  userId: activeUser.id,
+                  userName: activeUser.name,
+                  avatarColor: activeUser.avatarColor,
+                  quantity: pastItem.quantity,
+                },
+              ];
+          nextItems[existingIdx] = { ...item, claims: nextClaims };
+        } else {
+          nextItems.unshift({
+            id: `item_reclaim_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+            name: pastItem.name,
+            category: 'Re-Ordered Staple',
+            emoji: pastItem.emoji,
+            mode: pastItem.mode,
+            unitLabel: pastItem.unitLabel,
+            unitPrice: pastItem.unitPrice,
+            retailPrice: pastItem.retailPrice,
+            caseSize: pastItem.caseSize,
+            claims: [
+              {
+                userId: activeUser.id,
+                userName: activeUser.name,
+                avatarColor: activeUser.avatarColor,
+                quantity: pastItem.quantity,
+              },
+            ],
+          });
+        }
+      });
+
+      return {
+        ...pool,
+        participants: nextParticipants,
+        items: nextItems,
+      };
+    });
+
+    setPools(updatedPools);
+    await PoolRepository.saveLocalPools(updatedPools);
+
+    const alert = NotificationService.createAlert(
+      activePool,
+      'case_locked',
+      `🔁 Re-Claimed ${receipt.items.length} Weekly Staples!`,
+      `Added your items from "${receipt.poolTitle}" into ${activePool.title}.`
+    );
+    await pushAlerts([alert]);
+  };
+
   const handleSendMessage = async (text: string, isAnnouncement: boolean) => {
     const newMsg: PoolMessage = {
       id: `msg_${Date.now()}`,
@@ -299,7 +568,7 @@ export default function App() {
       userId: activeUser.id,
       userName: activeUser.name,
       avatarColor: activeUser.avatarColor,
-      isHost: Boolean(activeUser.isHost),
+      isHost: isCurrentUserHost,
       isAnnouncement,
       text,
       createdAt: formatTimestamp(),
@@ -381,6 +650,7 @@ export default function App() {
     const clonedItems: CatalogItem[] = activePool.items.map((item, idx) => ({
       ...item,
       id: `item_${nowTs}_${idx}`,
+      actualUnitPrice: undefined,
       claims:
         idx === 0
           ? [
@@ -398,8 +668,11 @@ export default function App() {
       ...activePool,
       id: `pool_${nowTs}`,
       joinCode: nextCode,
+      hostUserId: activeUser.id,
+      hostName: activeUser.name,
       title: `${activePool.title.replace(/ \(Next Week\)$/, '')} (Next Week)`,
       status: 'open',
+      trueUp: undefined,
       participants: [
         {
           ...activeUser,
@@ -661,14 +934,18 @@ export default function App() {
   };
 
   const handleCreatePool = async (newPool: GroupBuyPool) => {
-    const updatedPools = [newPool, ...pools];
+    const poolWithHostId: GroupBuyPool = {
+      ...newPool,
+      hostUserId: activeUser.id,
+    };
+    const updatedPools = [poolWithHostId, ...pools];
     setPools(updatedPools);
-    setSelectedPoolId(newPool.id);
+    setSelectedPoolId(poolWithHostId.id);
     setActiveTab('catalog');
     await PoolRepository.saveLocalPools(updatedPools);
 
     if (PoolRepository.getCurrentConfig().enabled) {
-      await PoolRepository.syncNewPool(newPool);
+      await PoolRepository.syncNewPool(poolWithHostId);
     }
   };
 
@@ -719,9 +996,23 @@ export default function App() {
     setSelectedPoolId(fresh[0].id);
   };
 
-  const filteredItems = activePool.items.filter((i) =>
-    itemFilter === 'all' ? true : i.mode === itemFilter
-  );
+  // Build dynamic categories for the active pool
+  const availableCategories = [
+    'All',
+    ...Array.from(new Set(activePool.items.map((i) => i.category))),
+  ];
+
+  // Apply Search Query + Mode Filter + Category Filter
+  const filteredItems = activePool.items.filter((i) => {
+    const matchesMode = itemFilter === 'all' ? true : i.mode === itemFilter;
+    const matchesCat =
+      selectedCategory === 'All' ? true : i.category === selectedCategory;
+    const matchesQuery =
+      !searchQuery.trim() ||
+      i.name.toLowerCase().includes(searchQuery.trim().toLowerCase()) ||
+      i.category.toLowerCase().includes(searchQuery.trim().toLowerCase());
+    return matchesMode && matchesCat && matchesQuery;
+  });
 
   const myBreakdown = getParticipantBreakdowns(activePool).find(
     (b) => b.userId === activeUser.id
@@ -767,7 +1058,7 @@ export default function App() {
               <Text style={{ fontWeight: '800', color: '#0F172A' }}>
                 {activeUser.name}
               </Text>{' '}
-              • Code:{' '}
+              {isCurrentUserHost ? '(Host) ' : ''}• Code:{' '}
               <Text style={{ fontWeight: '800', color: '#0D9488' }}>
                 {activePool.joinCode}
               </Text>
@@ -835,7 +1126,10 @@ export default function App() {
                   styles.poolPill,
                   isSelected && styles.poolPillSelected,
                 ]}
-                onPress={() => setSelectedPoolId(pool.id)}
+                onPress={() => {
+                  setSelectedPoolId(pool.id);
+                  setSelectedCategory('All');
+                }}
               >
                 <Text
                   style={[
@@ -900,7 +1194,7 @@ export default function App() {
                 activeTab === 'catalog' && styles.tabButtonTextActive,
               ]}
             >
-              🛒 Items ({activePool.items.length})
+              🛒 Shop
             </Text>
           </TouchableOpacity>
 
@@ -958,6 +1252,23 @@ export default function App() {
           <TouchableOpacity
             style={[
               styles.tabButton,
+              activeTab === 'wallet' && styles.tabButtonActive,
+            ]}
+            onPress={() => setActiveTab('wallet')}
+          >
+            <Text
+              style={[
+                styles.tabButtonText,
+                activeTab === 'wallet' && styles.tabButtonTextActive,
+              ]}
+            >
+              💰 Wallet
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.tabButton,
               activeTab === 'architecture' && styles.tabButtonActive,
             ]}
             onPress={() => setActiveTab('architecture')}
@@ -975,12 +1286,57 @@ export default function App() {
 
         {activeTab === 'catalog' && (
           <View>
+            {/* Feature #1: Search Bar & Category Pills */}
+            <View style={styles.searchRow}>
+              <TextInput
+                style={styles.searchInput}
+                placeholder="🔍 Search wholesale items or bulk splits..."
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+              />
+              {searchQuery.length > 0 && (
+                <TouchableOpacity
+                  style={styles.clearSearchBtn}
+                  onPress={() => setSearchQuery('')}
+                >
+                  <Text style={styles.clearSearchText}>✕</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.categoryScroll}
+              contentContainerStyle={{ gap: 6, paddingBottom: 6 }}
+            >
+              {availableCategories.map((cat) => (
+                <TouchableOpacity
+                  key={cat}
+                  style={[
+                    styles.catPill,
+                    selectedCategory === cat && styles.catPillActive,
+                  ]}
+                  onPress={() => setSelectedCategory(cat)}
+                >
+                  <Text
+                    style={[
+                      styles.catPillText,
+                      selectedCategory === cat && styles.catPillTextActive,
+                    ]}
+                  >
+                    {cat}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
             {/* Filter & Pitch Item Bar */}
             <View style={styles.filterRow}>
               <View style={styles.filterPills}>
                 {(
                   [
-                    { key: 'all', label: 'All Items' },
+                    { key: 'all', label: 'All Modes' },
                     { key: 'individual', label: 'Direct Wholesale' },
                     { key: 'case_split', label: 'Bulk Case Splits' },
                   ] as const
@@ -1025,6 +1381,16 @@ export default function App() {
                 onUpdateQuantity={handleUpdateQuantity}
               />
             ))}
+
+            {/* Feature #1: Neighbor Bulk Split Wishlist & Upvotes */}
+            <WishlistSection
+              pool={activePool}
+              activeUser={activeUser}
+              isCurrentUserHost={isCurrentUserHost}
+              onPledgeWishlist={handlePledgeWishlist}
+              onPromoteWishlistToCatalog={handlePromoteWishlistToCatalog}
+              onAddWishlistRequest={handleAddWishlistRequest}
+            />
           </View>
         )}
 
@@ -1032,6 +1398,7 @@ export default function App() {
           <SplitLedgerView
             pool={activePool}
             currentUserId={activeUser.id}
+            isCurrentUserHost={isCurrentUserHost}
             onTogglePaidStatus={handleTogglePaidStatus}
           />
         )}
@@ -1047,12 +1414,28 @@ export default function App() {
         {activeTab === 'host_sheet' && (
           <HostOrderSheetView
             pool={activePool}
+            activeUser={activeUser}
+            isCurrentUserHost={isCurrentUserHost}
+            onSwitchToHostProfile={handleSwitchToPoolHost}
             onToggleLockPool={handleToggleLockPool}
             onRerunWeeklyPool={handleRerunWeeklyPool}
             onHostCoverRemainder={handleHostCoverRemainder}
             onTrimPartialCase={handleTrimPartialCase}
+            onUpdateItemActualPrice={handleUpdateItemActualPrice}
+            onUpdateReceiptTrueUp={handleUpdateReceiptTrueUp}
             onTogglePaidStatus={handleTogglePaidStatus}
             onTogglePickedUp={handleTogglePickedUp}
+          />
+        )}
+
+        {activeTab === 'wallet' && (
+          <WalletHistoryView
+            pools={pools}
+            activePool={activePool}
+            activeUser={activeUser}
+            pastReceipts={PAST_USER_RECEIPTS}
+            onReclaimReceiptItems={handleReclaimReceiptItems}
+            onVerifyOtpEmail={handleVerifyOtpEmail}
           />
         )}
 
@@ -1350,13 +1733,64 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
   tabButtonText: {
-    fontSize: 10.5,
+    fontSize: 10,
     fontWeight: '700',
     color: '#475569',
   },
   tabButtonTextActive: {
     color: '#0F172A',
     fontWeight: '800',
+  },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  searchInput: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    fontSize: 13,
+    color: '#0F172A',
+  },
+  clearSearchBtn: {
+    marginLeft: 8,
+    backgroundColor: '#E2E8F0',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 10,
+  },
+  clearSearchText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#475569',
+  },
+  categoryScroll: {
+    marginBottom: 8,
+  },
+  catPill: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  catPillActive: {
+    backgroundColor: '#0D9488',
+    borderColor: '#0D9488',
+  },
+  catPillText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  catPillTextActive: {
+    color: '#FFFFFF',
   },
   filterRow: {
     flexDirection: 'row',

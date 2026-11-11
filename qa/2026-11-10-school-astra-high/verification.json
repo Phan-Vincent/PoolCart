@@ -1,0 +1,36 @@
+{
+  "status": "All five selected defects reproduced",
+  "tests": [
+    {
+      "finding": "Threshold/checkout/manifest mismatch",
+      "committed": 290,
+      "thresholdTotal": 305,
+      "displayedSupplierInvoice": 290,
+      "participantTotalDue": 305,
+      "supplierCostUnderConfiguredFeeRule": 314
+    },
+    {
+      "finding": "Full-case shares classified pending after rollover",
+      "poolCommitted": 18,
+      "participantCommitted": 0,
+      "participantPending": 21
+    },
+    {
+      "finding": "Cent rounding does not reconcile",
+      "displayedTotalCents": 2301,
+      "supplierInvoiceCents": 2300
+    },
+    {
+      "finding": "Venmo navigation immediately marks paid",
+      "paymentConfirmationProvided": false,
+      "paidCallbackCount": 1
+    },
+    {
+      "finding": "RPC lock rejection falls back to unrestricted absolute write",
+      "rpcError": "Pool is locked",
+      "fallbackWrites": 2,
+      "finalQuantity": 7
+    }
+  ],
+  "limits": "Frozen snapshot; mocked native navigation and Supabase transport. No PostgreSQL, live backend, device, or full-app runtime was used."
+}

@@ -1,0 +1,26 @@
+{
+  "captured_at": "2026-11-11T03:19:22.855224+00:00",
+  "head": "78d10618a761762b81e95f1a0d14a81b03fc4404",
+  "status": " M qa/2026-11-10-school-astra-high/delegation.json\n?? qa/2026-11-10-school-astra-high/REPORT.md\n?? qa/2026-11-10-school-astra-high/drift.json\n?? qa/2026-11-10-school-astra-high/school-chat-rendered.txt\n?? qa/2026-11-10-school-astra-high/school-qa-proof.jpg\n?? qa/2026-11-10-school-astra-high/school-review.txt\n?? qa/2026-11-10-school-astra-high/verification.json\n?? qa/2026-11-10-school-astra-high/verify-snapshot.cjs\n",
+  "files": {
+    "README.md": "267637d1fe54f23d36d09f130effec31e6d1132bee221feaca55c5e6b735628e",
+    "package.json": "10cef5bd91a49570d02b94b9b0bc803e779fea1026e96416051b70d88243c7f5",
+    "tsconfig.json": "7c9ec7da1510991d8d76cc23ea4360f47b9fdea6eb98f5ae273febe935452428",
+    "app.json": "c0abee15afd900fabf9f0483fbb4a2820b84763722a6388b5cbad9243b9097a6",
+    "App.tsx": "c2597b64daa90c920f282cef45657ee959d353d54a82271d95ec2d2eede3b9a6",
+    "src/data/mockPools.ts": "f89f2cd786497d2667a3c12fa857f7266989134ad7a57bb75cf7eeafac2cafa1",
+    "src/services/notifications.ts": "0fb42754741f0c1be09e7b64a0c3f1b3fe3778feb8dff97ba23fa1204e00eda8",
+    "src/services/repository.ts": "7e0633f84c417691d30b4bb4c69e03da2d991ddbb1752a95c86ccc45376f0f3a",
+    "src/types/groupBuy.ts": "853fbe28bd4bbb762e0cd868517a262db68e906999b5d6493d0d30f7194dc1b0",
+    "src/utils/calculations.ts": "5e715e47dc0f546f8d82d475e9f414a7b2ef82d48bfc6f8ea5bb3373c5aac0db",
+    "src/components/ActionModals.tsx": "81c1a8aeca10a47992df3e272d0bafbf7a79e2290e06c366a315b24e89e8b1eb",
+    "src/components/CatalogItemCard.tsx": "f00bf05562674b2b0a42d7a7a602ab9369160ce6186ad5e531bd5859979867ba",
+    "src/components/HostOrderSheetView.tsx": "72d87ff124831e0ba70bc219776dc18178de780c882d4e9aa1dcbb1ec18d6ce6",
+    "src/components/NotificationCenterModal.tsx": "871cfaa9e9fab03dae0bdcd3077d8400f28ae49e0469e7607beb5570c5465a8a",
+    "src/components/PoolChatView.tsx": "0326088b050e12b4b57045ce86f2822e58c6e1b5577eef5717c7ed0258fd3875",
+    "src/components/PoolProgressCard.tsx": "49ec7b8c7e5f737cdfaccc5d5c5ba6563814ede2b6bc9231b326ce3d94341d36",
+    "src/components/SplitLedgerView.tsx": "e03b57073e378c0bf5a56055a13d9e329dad8d638e5d6f170e79bceea50fff6e",
+    "src/components/SupabaseSetupCard.tsx": "e04df4462f9eb9bf3fbfe703ab62b144205f6b4cfd5fcc34f7f0984460498dec",
+    "supabase/schema.sql": "179054355406dae97ad8b82d9e6dc3b68f990736cd17fbe28290f37decf3335d"
+  }
+}

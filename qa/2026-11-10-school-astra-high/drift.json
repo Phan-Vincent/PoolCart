@@ -1,0 +1,7 @@
+{
+  "changed_since_snapshot": [
+    "App.tsx",
+    "src/components/ActionModals.tsx",
+    "src/components/CatalogItemCard.tsx"
+  ]
+}

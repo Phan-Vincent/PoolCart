@@ -1,14 +1,16 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
   Share,
+  TextInput,
 } from 'react-native';
-import { GroupBuyPool } from '../types/groupBuy';
+import { GroupBuyPool, Participant, ReceiptTrueUp } from '../types/groupBuy';
 import {
   buildSupplierOrderExportText,
+  getEffectiveUnitPrice,
   getParticipantBreakdowns,
   getPoolProgressSummary,
   getWholesaleOrderManifest,
@@ -16,23 +18,45 @@ import {
 
 interface Props {
   pool: GroupBuyPool;
+  activeUser: Participant;
+  isCurrentUserHost: boolean;
+  onSwitchToHostProfile: () => void;
   onToggleLockPool: () => void;
   onRerunWeeklyPool: () => void;
   onHostCoverRemainder: (itemId: string, neededQty: number) => void;
   onTrimPartialCase: (itemId: string) => void;
+  onUpdateItemActualPrice: (itemId: string, actualPrice: number | undefined) => void;
+  onUpdateReceiptTrueUp: (trueUp: ReceiptTrueUp) => void;
   onTogglePaidStatus: (userId: string) => void;
   onTogglePickedUp: (userId: string) => void;
 }
 
 export const HostOrderSheetView: React.FC<Props> = ({
   pool,
+  activeUser,
+  isCurrentUserHost,
+  onSwitchToHostProfile,
   onToggleLockPool,
   onRerunWeeklyPool,
   onHostCoverRemainder,
   onTrimPartialCase,
+  onUpdateItemActualPrice,
+  onUpdateReceiptTrueUp,
   onTogglePaidStatus,
   onTogglePickedUp,
 }) => {
+  const [taxFeeInput, setTaxFeeInput] = useState(
+    pool.trueUp?.taxOrBagFee !== undefined ? String(pool.trueUp.taxOrBagFee) : '0'
+  );
+  const [deliveryOverrideInput, setDeliveryOverrideInput] = useState(
+    pool.trueUp?.actualDeliveryFee !== undefined
+      ? String(pool.trueUp.actualDeliveryFee)
+      : ''
+  );
+  const [receiptNoteInput, setReceiptNoteInput] = useState(
+    pool.trueUp?.receiptNote || ''
+  );
+
   const summary = getPoolProgressSummary(pool);
   const manifest = getWholesaleOrderManifest(pool);
   const breakdowns = getParticipantBreakdowns(pool).filter(
@@ -53,8 +77,60 @@ export const HostOrderSheetView: React.FC<Props> = ({
     }
   };
 
+  const handleApplyTrueUp = () => {
+    const parsedTax = parseFloat(taxFeeInput) || 0;
+    const parsedDeliv =
+      deliveryOverrideInput.trim() !== ''
+        ? parseFloat(deliveryOverrideInput)
+        : undefined;
+
+    onUpdateReceiptTrueUp({
+      taxOrBagFee: parsedTax,
+      actualDeliveryFee:
+        parsedDeliv !== undefined && !isNaN(parsedDeliv)
+          ? parsedDeliv
+          : undefined,
+      receiptNote:
+        receiptNoteInput.trim() ||
+        'Reconciled against final wholesale register receipt',
+      reconciledAt: new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+    });
+  };
+
+  const handleApplyQuickDiscount = (itemId: string, quotedPrice: number, delta: number) => {
+    const next = Math.max(0.5, Number((quotedPrice + delta).toFixed(2)));
+    onUpdateItemActualPrice(itemId, next);
+  };
+
   return (
     <View style={styles.container}>
+      {/* Feature #4: Role Permission Guard Banner */}
+      {!isCurrentUserHost && (
+        <View style={styles.roleGuardBanner}>
+          <View style={{ flex: 1, paddingRight: 10 }}>
+            <Text style={styles.roleGuardTitle}>
+              🔒 Read-Only Neighbor View (Host Role Guard Active)
+            </Text>
+            <Text style={styles.roleGuardSub}>
+              You are viewing as <Text style={{ fontWeight: '800' }}>{activeUser.name}</Text>.
+              Only the verified Pool Host (<Text style={{ fontWeight: '800' }}>{pool.hostName}</Text>)
+              can lock the pool, reconcile receipts, or mark payments.
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.switchHostBtn}
+            onPress={onSwitchToHostProfile}
+          >
+            <Text style={styles.switchHostBtnText}>
+              🔑 Act as {pool.hostName.split(' ')[0]}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* Host Cutoff & Lock Control Card */}
       <View
         style={[
@@ -87,8 +163,10 @@ export const HostOrderSheetView: React.FC<Props> = ({
             style={[
               styles.lockButton,
               isLocked ? styles.unlockButton : styles.lockNowButton,
+              !isCurrentUserHost && styles.disabledBtn,
             ]}
             onPress={onToggleLockPool}
+            disabled={!isCurrentUserHost}
           >
             <Text style={styles.lockButtonText}>
               {isLocked ? '🔓 Reopen Pool' : '🔒 Lock Pool'}
@@ -101,8 +179,9 @@ export const HostOrderSheetView: React.FC<Props> = ({
             Want to run this exact supplier catalog again next week?
           </Text>
           <TouchableOpacity
-            style={styles.rerunBtn}
+            style={[styles.rerunBtn, !isCurrentUserHost && styles.disabledBtn]}
             onPress={onRerunWeeklyPool}
+            disabled={!isCurrentUserHost}
           >
             <Text style={styles.rerunBtnText}>🔁 Rerun Next Week</Text>
           </TouchableOpacity>
@@ -131,20 +210,21 @@ export const HostOrderSheetView: React.FC<Props> = ({
                   <Text style={{ fontWeight: '800' }}>
                     {pItem.neededToFillNextCase} more
                   </Text>{' '}
-                  (${(pItem.neededToFillNextCase * pItem.unitPrice).toFixed(2)})
+                  (${(pItem.neededToFillNextCase * pItem.effectiveUnitPrice).toFixed(2)})
                   to complete case
                 </Text>
               </View>
 
               <View style={styles.partialActionBtns}>
                 <TouchableOpacity
-                  style={styles.coverBtn}
+                  style={[styles.coverBtn, !isCurrentUserHost && styles.disabledBtn]}
                   onPress={() =>
                     onHostCoverRemainder(
                       pItem.itemId,
                       pItem.neededToFillNextCase
                     )
                   }
+                  disabled={!isCurrentUserHost}
                 >
                   <Text style={styles.coverBtnText}>
                     + Cover {pItem.neededToFillNextCase}
@@ -152,8 +232,9 @@ export const HostOrderSheetView: React.FC<Props> = ({
                 </TouchableOpacity>
 
                 <TouchableOpacity
-                  style={styles.trimBtn}
+                  style={[styles.trimBtn, !isCurrentUserHost && styles.disabledBtn]}
                   onPress={() => onTrimPartialCase(pItem.itemId)}
+                  disabled={!isCurrentUserHost}
                 >
                   <Text style={styles.trimBtnText}>Drop Partial</Text>
                 </TouchableOpacity>
@@ -162,6 +243,121 @@ export const HostOrderSheetView: React.FC<Props> = ({
           ))}
         </View>
       )}
+
+      {/* Feature #2: Wholesale Receipt & Price Adjustment True-Up Card */}
+      <View style={styles.manifestCard}>
+        <View style={styles.manifestHeaderRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.sectionLabel}>
+              🧾 WHOLESALE RECEIPT TRUE-UP & WEIGHT RECONCILIATION
+            </Text>
+            <Text style={styles.trueUpSub}>
+              Did catch-weight meat or produce prices shift at the wholesale
+              register? Adjust unit prices or add receipt tax/bag fees—every
+              neighbor’s Venmo split updates pro-rata automatically.
+            </Text>
+          </View>
+        </View>
+
+        {pool.items.map((item) => {
+          const eff = getEffectiveUnitPrice(item);
+          const isAdjusted = eff !== item.unitPrice;
+          return (
+            <View key={item.id} style={styles.trueUpItemRow}>
+              <View style={{ flex: 1, paddingRight: 8 }}>
+                <Text style={styles.trueUpItemName}>
+                  {item.emoji} {item.name}
+                </Text>
+                <Text style={styles.trueUpItemSub}>
+                  Quoted: ${item.unitPrice.toFixed(2)} •{' '}
+                  <Text
+                    style={{
+                      fontWeight: '800',
+                      color: isAdjusted ? '#0D9488' : '#334155',
+                    }}
+                  >
+                    Receipt: ${eff.toFixed(2)}
+                  </Text>
+                </Text>
+              </View>
+
+              <View style={styles.trueUpBtnsRow}>
+                <TouchableOpacity
+                  style={[styles.adjChip, !isCurrentUserHost && styles.disabledBtn]}
+                  onPress={() => handleApplyQuickDiscount(item.id, eff, -0.5)}
+                  disabled={!isCurrentUserHost}
+                >
+                  <Text style={styles.adjChipText}>-$0.50</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.adjChip, !isCurrentUserHost && styles.disabledBtn]}
+                  onPress={() => handleApplyQuickDiscount(item.id, eff, 0.5)}
+                  disabled={!isCurrentUserHost}
+                >
+                  <Text style={styles.adjChipText}>+$0.50</Text>
+                </TouchableOpacity>
+                {isAdjusted && (
+                  <TouchableOpacity
+                    style={styles.resetChip}
+                    onPress={() => onUpdateItemActualPrice(item.id, undefined)}
+                    disabled={!isCurrentUserHost}
+                  >
+                    <Text style={styles.resetChipText}>Reset</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+          );
+        })}
+
+        <View style={styles.trueUpInputsRow}>
+          <View style={{ flex: 1, marginRight: 8 }}>
+            <Text style={styles.inputLbl}>Extra Tax / Ice / CRV ($)</Text>
+            <TextInput
+              style={styles.input}
+              keyboardType="decimal-pad"
+              editable={isCurrentUserHost}
+              value={taxFeeInput}
+              onChangeText={setTaxFeeInput}
+            />
+          </View>
+          <View style={{ flex: 1, marginRight: 8 }}>
+            <Text style={styles.inputLbl}>Actual Delivery Fee ($)</Text>
+            <TextInput
+              style={styles.input}
+              keyboardType="decimal-pad"
+              placeholder={String(summary.effectiveDeliveryFee)}
+              editable={isCurrentUserHost}
+              value={deliveryOverrideInput}
+              onChangeText={setDeliveryOverrideInput}
+            />
+          </View>
+          <TouchableOpacity
+            style={[
+              styles.applyTrueUpBtn,
+              !isCurrentUserHost && styles.disabledBtn,
+            ]}
+            onPress={handleApplyTrueUp}
+            disabled={!isCurrentUserHost}
+          >
+            <Text style={styles.applyTrueUpBtnText}>Apply True-Up</Text>
+          </TouchableOpacity>
+        </View>
+
+        <TextInput
+          style={[styles.input, { marginTop: 8 }]}
+          placeholder="Receipt note (e.g. 'Avocados were $1 off per bag at dock')"
+          editable={isCurrentUserHost}
+          value={receiptNoteInput}
+          onChangeText={setReceiptNoteInput}
+        />
+
+        {pool.trueUp?.reconciledAt && (
+          <Text style={styles.reconciledBadge}>
+            ✓ Receipt reconciled at {pool.trueUp.reconciledAt}: "{pool.trueUp.receiptNote}"
+          </Text>
+        )}
+      </View>
 
       {/* Master Wholesale Purchase Order Manifest */}
       <View style={styles.manifestCard}>
@@ -192,7 +388,8 @@ export const HostOrderSheetView: React.FC<Props> = ({
                     {line.emoji} {line.itemName}
                   </Text>
                   <Text style={styles.manifestQtySub}>
-                    Order qty: {line.orderQuantityLabel}
+                    Order qty: {line.orderQuantityLabel} @ $
+                    {line.effectiveUnitPrice.toFixed(2)}
                   </Text>
                 </View>
                 <Text style={styles.manifestLineTotal}>
@@ -217,9 +414,19 @@ export const HostOrderSheetView: React.FC<Props> = ({
                 : `$${manifest.supplierDeliveryFee.toFixed(2)}`}
             </Text>
           </View>
+          {manifest.extraTaxOrBagFee !== 0 && (
+            <View style={styles.invoiceRow}>
+              <Text style={styles.invoiceLabel}>
+                Receipt Tax / CRV / Weight Adj.
+              </Text>
+              <Text style={styles.invoiceValue}>
+                ${manifest.extraTaxOrBagFee.toFixed(2)}
+              </Text>
+            </View>
+          )}
           <View style={[styles.invoiceRow, styles.invoiceGrandRow]}>
             <Text style={styles.invoiceGrandLabel}>
-              Est. Supplier Invoice Total
+              Final Supplier Invoice Total
             </Text>
             <Text style={styles.invoiceGrandValue}>
               ${manifest.grandTotalSupplierInvoice.toFixed(2)}
@@ -265,6 +472,7 @@ export const HostOrderSheetView: React.FC<Props> = ({
                     : styles.chipAmber,
                 ]}
                 onPress={() => onTogglePaidStatus(b.userId)}
+                disabled={!isCurrentUserHost}
               >
                 <Text
                   style={[
@@ -284,6 +492,7 @@ export const HostOrderSheetView: React.FC<Props> = ({
                   b.pickedUp ? styles.chipTeal : styles.chipGray,
                 ]}
                 onPress={() => onTogglePickedUp(b.userId)}
+                disabled={!isCurrentUserHost}
               >
                 <Text
                   style={[
@@ -305,6 +514,42 @@ export const HostOrderSheetView: React.FC<Props> = ({
 const styles = StyleSheet.create({
   container: {
     paddingBottom: 28,
+  },
+  roleGuardBanner: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FCA5A5',
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  roleGuardTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#991B1B',
+  },
+  roleGuardSub: {
+    fontSize: 11,
+    color: '#7F1D1D',
+    marginTop: 2,
+    lineHeight: 15,
+  },
+  switchHostBtn: {
+    backgroundColor: '#991B1B',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 9,
+  },
+  switchHostBtnText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  disabledBtn: {
+    opacity: 0.45,
   },
   controlCard: {
     borderRadius: 16,
@@ -469,13 +714,103 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: 10,
   },
   sectionLabel: {
     fontSize: 11,
     fontWeight: '800',
     color: '#64748B',
     letterSpacing: 0.6,
+  },
+  trueUpSub: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 3,
+    lineHeight: 16,
+  },
+  trueUpItemRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  trueUpItemName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  trueUpItemSub: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 1,
+  },
+  trueUpBtnsRow: {
+    flexDirection: 'row',
+    gap: 5,
+  },
+  adjChip: {
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 7,
+  },
+  adjChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  resetChip: {
+    backgroundColor: '#FEE2E2',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 7,
+  },
+  resetChipText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#991B1B',
+  },
+  trueUpInputsRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    marginTop: 10,
+  },
+  inputLbl: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#475569',
+    marginBottom: 4,
+  },
+  input: {
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    fontSize: 12,
+    color: '#0F172A',
+  },
+  applyTrueUpBtn: {
+    backgroundColor: '#0D9488',
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 8,
+  },
+  applyTrueUpBtnText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  reconciledBadge: {
+    marginTop: 8,
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#0F766E',
   },
   manifestSupplier: {
     fontSize: 16,

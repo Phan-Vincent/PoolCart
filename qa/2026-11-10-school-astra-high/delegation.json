@@ -8,9 +8,21 @@
   "reasoning_effort": "High",
   "mode": "Work",
   "submission_status": "submitted",
-  "completion_status": "running",
+  "completion_status": "completed",
   "source_upload_approved": true,
   "source_snapshot": "source-snapshot.txt",
   "typecheck": "passed before submission",
-  "upload_recovery": "initial approval review rejected upload; user explicitly approved source upload; extension upload failed due file access, native picker succeeded"
+  "upload_recovery": "initial approval review rejected upload; user explicitly approved source upload; extension upload failed due file access, native picker succeeded",
+  "completed_at": "2026-11-11T03:15:55.673974+00:00",
+  "chat_url": "https://chatgpt.com/c/6af3dc1e-ee68-83e8-b915-22e5471069c6",
+  "worker_self_report": "Codex (/root); exact model identifier not exposed",
+  "model_provenance": "GPT-6 Astra High visibly verified in school UI; response self-identification differs; backend model not independently attested",
+  "school_findings": 12,
+  "independently_reproduced_defects": 5,
+  "final_typecheck": "passed",
+  "latest_app_atomic_and_notification_wiring": "present; supersedes snapshot disconnection claims",
+  "source_changes_by_this_task": false,
+  "committed": false,
+  "pushed": false,
+  "deployed": false
 }
