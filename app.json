@@ -1,20 +1,47 @@
 {
   "expo": {
     "name": "PoolCart - Grocery Group Buy",
-    "slug": "grocery-groupbuy",
+    "slug": "poolcart",
+    "scheme": "poolcart",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.poolcart.grocerygroupbuy"
+      "bundleIdentifier": "com.poolcart.grocerygroupbuy",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "LSApplicationQueriesSchemes": [
+          "venmo"
+        ]
+      }
     },
     "android": {
-      "package": "com.poolcart.grocerygroupbuy"
+      "package": "com.poolcart.grocerygroupbuy",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "poolcart"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
+        }
+      ]
     },
     "web": {
-      "bundler": "metro"
+      "bundler": "metro",
+      "output": "single",
+      "name": "PoolCart — Neighborhood Grocery Group Buys",
+      "shortName": "PoolCart",
+      "themeColor": "#0D9488",
+      "backgroundColor": "#F8FAFC"
     }
   }
 }

@@ -30,6 +30,23 @@ export function getEffectiveUnitPrice(item: CatalogItem): number {
     : item.unitPrice;
 }
 
+export function extractPoolCodeFromUrl(rawUrl: string | null | undefined): string | null {
+  if (!rawUrl) return null;
+  try {
+    const queryMatch = rawUrl.match(/[?&](?:pool|code)=([A-Za-z0-9_-]+)/i);
+    if (queryMatch && queryMatch[1]) {
+      return queryMatch[1].toUpperCase();
+    }
+    const pathMatch = rawUrl.match(/\/join\/([A-Za-z0-9_-]+)/i);
+    if (pathMatch && pathMatch[1]) {
+      return pathMatch[1].toUpperCase();
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 /**
  * Calculates how many full cases are formed for a `case_split` item,
  * and how many units are still needed to complete the current partial case.

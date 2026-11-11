@@ -9,6 +9,8 @@ import {
   StatusBar,
   Share,
   TextInput,
+  Linking,
+  Platform,
 } from 'react-native';
 import {
   CURRENT_USER,
@@ -41,6 +43,7 @@ import {
 } from './src/services/notifications';
 import {
   buildShareablePoolInviteText,
+  extractPoolCodeFromUrl,
   getCaseSplitStatus,
   getParticipantBreakdowns,
   getPoolProgressSummary,
@@ -127,57 +130,83 @@ export default function App() {
     []
   );
 
-  const refreshPools = useCallback(async (realtimeTable?: string) => {
-    const cfg = PoolRepository.getCurrentConfig();
-    const { pools: loaded, error } = await PoolRepository.loadPools();
-
-    if (loaded && loaded.length > 0) {
-      setPools(loaded);
-      setSelectedPoolId((prev) =>
-        loaded.some((p) => p.id === prev) ? prev : loaded[0].id
+  const applyDeepLinkPoolCode = useCallback(
+    (code: string | null, poolList: GroupBuyPool[]) => {
+      if (!code) return;
+      const matched = poolList.find(
+        (p) =>
+          p.joinCode.toUpperCase() === code.toUpperCase() ||
+          p.id.toUpperCase() === code.toUpperCase()
       );
-    }
-
-    if (cfg.enabled && cfg.url && cfg.anonKey) {
-      if (error) {
-        setSyncStatus({
-          mode: 'supabase_error',
-          lastSyncedAt: formatTimestamp(),
-          errorMessage: error,
-        });
-      } else {
-        setSyncStatus((prev) => ({
-          mode: 'supabase_live',
-          lastSyncedAt: formatTimestamp(),
-          lastRealtimeEvent: realtimeTable
-            ? `Table '${realtimeTable}' updated`
-            : prev.lastRealtimeEvent,
-        }));
+      if (matched) {
+        setSelectedPoolId(matched.id);
+        setActiveTab('catalog');
       }
-    } else {
-      setSyncStatus({
-        mode: 'local',
-        lastSyncedAt: formatTimestamp(),
-      });
-    }
-  }, []);
+    },
+    []
+  );
+
+  const refreshPools = useCallback(
+    async (realtimeTable?: string, initialDeepLinkCode?: string | null) => {
+      const cfg = PoolRepository.getCurrentConfig();
+      const { pools: loaded, error } = await PoolRepository.loadPools();
+
+      if (loaded && loaded.length > 0) {
+        setPools(loaded);
+        if (initialDeepLinkCode) {
+          applyDeepLinkPoolCode(initialDeepLinkCode, loaded);
+        } else {
+          setSelectedPoolId((prev) =>
+            loaded.some((p) => p.id === prev) ? prev : loaded[0].id
+          );
+        }
+      }
+
+      if (cfg.enabled && cfg.url && cfg.anonKey) {
+        if (error) {
+          setSyncStatus({
+            mode: 'supabase_error',
+            lastSyncedAt: formatTimestamp(),
+            errorMessage: error,
+          });
+        } else {
+          setSyncStatus((prev) => ({
+            mode: 'supabase_live',
+            lastSyncedAt: formatTimestamp(),
+            lastRealtimeEvent: realtimeTable
+              ? `Table '${realtimeTable}' updated`
+              : prev.lastRealtimeEvent,
+          }));
+        }
+      } else {
+        setSyncStatus({
+          mode: 'local',
+          lastSyncedAt: formatTimestamp(),
+        });
+      }
+    },
+    [applyDeepLinkPoolCode]
+  );
 
   useEffect(() => {
     let unsubscribeRealtime = () => {};
 
     const bootstrap = async () => {
-      const [savedUser, savedAlerts, savedPrefs, cfg] = await Promise.all([
-        PoolRepository.loadActiveUser(),
-        NotificationService.loadAlerts(),
-        NotificationService.loadPreferences(),
-        PoolRepository.initConfig(),
-      ]);
+      const [savedUser, savedAlerts, savedPrefs, cfg, initialUrl] =
+        await Promise.all([
+          PoolRepository.loadActiveUser(),
+          NotificationService.loadAlerts(),
+          NotificationService.loadPreferences(),
+          PoolRepository.initConfig(),
+          Linking.getInitialURL().catch(() => null),
+        ]);
 
       setActiveUser(savedUser);
       setAlerts(savedAlerts);
       setNotifPrefs(savedPrefs);
 
-      await refreshPools();
+      const codeFromUrl = extractPoolCodeFromUrl(initialUrl);
+      await refreshPools(undefined, codeFromUrl);
 
       if (cfg.enabled) {
         unsubscribeRealtime = PoolRepository.subscribeToRealtime((table) => {
@@ -188,10 +217,21 @@ export default function App() {
 
     bootstrap();
 
+    const sub = Linking.addEventListener('url', (event) => {
+      const code = extractPoolCodeFromUrl(event.url);
+      if (code) {
+        setPools((currentPools) => {
+          applyDeepLinkPoolCode(code, currentPools);
+          return currentPools;
+        });
+      }
+    });
+
     return () => {
       unsubscribeRealtime();
+      sub.remove();
     };
-  }, [refreshPools]);
+  }, [refreshPools, applyDeepLinkPoolCode]);
 
   const activePool =
     pools.find((p) => p.id === selectedPoolId) || pools[0];
@@ -343,9 +383,6 @@ export default function App() {
     }
   };
 
-  /**
-   * Feature #1: Wishlist Pledges, New Split Requests & Host Promotion to Catalog
-   */
   const handlePledgeWishlist = async (wishId: string) => {
     const updatedPools = pools.map((pool) => {
       if (pool.id !== activePool.id) return pool;
@@ -386,7 +423,6 @@ export default function App() {
   };
 
   const handlePromoteWishlistToCatalog = async (wish: WishlistRequest) => {
-    // Convert pledged user IDs into initial 1-unit claims
     const initialClaims: ParticipantShare[] = wish.pledgedUserIds.map((uid) => {
       const known =
         activePool.participants.find((p) => p.id === uid) ||
@@ -435,9 +471,6 @@ export default function App() {
     await pushAlerts([alert]);
   };
 
-  /**
-   * Feature #2: Wholesale Receipt True-Up Handlers
-   */
   const handleUpdateItemActualPrice = async (
     itemId: string,
     actualPrice: number | undefined
@@ -477,9 +510,6 @@ export default function App() {
     await pushAlerts([alert]);
   };
 
-  /**
-   * Feature #3: 1-Tap Re-Claim Staples from Past Receipts
-   */
   const handleReclaimReceiptItems = async (receipt: PastOrderReceipt) => {
     const updatedPools = pools.map((pool) => {
       if (pool.id !== activePool.id) return pool;
@@ -1022,514 +1052,523 @@ export default function App() {
   const unreadAlertsCount = alerts.filter((a) => !a.read).length;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar barStyle="dark-content" />
+    <View style={styles.outerShell}>
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar barStyle="dark-content" />
 
-      {/* Header */}
-      <View style={styles.header}>
-        <View style={{ flex: 1 }}>
-          <View style={styles.brandRow}>
-            <Text style={styles.brandTitle}>🥬 PoolCart</Text>
-            <TouchableOpacity
-              style={[
-                styles.syncPill,
-                syncStatus.mode === 'supabase_live'
-                  ? styles.syncPillLive
-                  : styles.syncPillLocal,
-              ]}
-              onPress={() => setActiveTab('architecture')}
-            >
-              <View
+        {/* Header */}
+        <View style={styles.header}>
+          <View style={{ flex: 1 }}>
+            <View style={styles.brandRow}>
+              <Text style={styles.brandTitle}>🥬 PoolCart</Text>
+              <TouchableOpacity
                 style={[
-                  styles.syncDot,
+                  styles.syncPill,
                   syncStatus.mode === 'supabase_live'
-                    ? { backgroundColor: '#10B981' }
-                    : { backgroundColor: '#0D9488' },
+                    ? styles.syncPillLive
+                    : styles.syncPillLocal,
                 ]}
-              />
-              <Text style={styles.syncPillText}>
-                {syncStatus.mode === 'supabase_live' ? 'Live' : 'Local'}
+                onPress={() => setActiveTab('architecture')}
+              >
+                <View
+                  style={[
+                    styles.syncDot,
+                    syncStatus.mode === 'supabase_live'
+                      ? { backgroundColor: '#10B981' }
+                      : { backgroundColor: '#0D9488' },
+                  ]}
+                />
+                <Text style={styles.syncPillText}>
+                  {syncStatus.mode === 'supabase_live' ? 'Live' : 'Local'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+            <TouchableOpacity onPress={() => setActiveTab('architecture')}>
+              <Text style={styles.locationSub}>
+                👤{' '}
+                <Text style={{ fontWeight: '800', color: '#0F172A' }}>
+                  {activeUser.name}
+                </Text>{' '}
+                {isCurrentUserHost ? '(Host) ' : ''}• Code:{' '}
+                <Text style={{ fontWeight: '800', color: '#0D9488' }}>
+                  {activePool.joinCode}
+                </Text>
               </Text>
             </TouchableOpacity>
           </View>
-          <TouchableOpacity onPress={() => setActiveTab('architecture')}>
-            <Text style={styles.locationSub}>
-              👤{' '}
-              <Text style={{ fontWeight: '800', color: '#0F172A' }}>
-                {activeUser.name}
-              </Text>{' '}
-              {isCurrentUserHost ? '(Host) ' : ''}• Code:{' '}
-              <Text style={{ fontWeight: '800', color: '#0D9488' }}>
-                {activePool.joinCode}
+
+          <View style={styles.headerActions}>
+            <TouchableOpacity
+              style={styles.bellButton}
+              onPress={() => setShowNotificationModal(true)}
+            >
+              <Text style={styles.bellButtonText}>
+                🔔{unreadAlertsCount > 0 ? ` ${unreadAlertsCount}` : ''}
               </Text>
-            </Text>
-          </TouchableOpacity>
-        </View>
+            </TouchableOpacity>
 
-        <View style={styles.headerActions}>
-          <TouchableOpacity
-            style={styles.bellButton}
-            onPress={() => setShowNotificationModal(true)}
-          >
-            <Text style={styles.bellButtonText}>
-              🔔{unreadAlertsCount > 0 ? ` ${unreadAlertsCount}` : ''}
-            </Text>
-          </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.codeJoinButton}
+              onPress={() => setShowJoinByCodeModal(true)}
+            >
+              <Text style={styles.codeJoinButtonText}>🔑 Code</Text>
+            </TouchableOpacity>
 
-          <TouchableOpacity
-            style={styles.codeJoinButton}
-            onPress={() => setShowJoinByCodeModal(true)}
-          >
-            <Text style={styles.codeJoinButtonText}>🔑 Code</Text>
-          </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.sharePoolButton}
+              onPress={handleSharePoolInvite}
+            >
+              <Text style={styles.sharePoolButtonText}>📤</Text>
+            </TouchableOpacity>
 
-          <TouchableOpacity
-            style={styles.sharePoolButton}
-            onPress={handleSharePoolInvite}
-          >
-            <Text style={styles.sharePoolButtonText}>📤</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.newPoolButton}
-            onPress={() => setShowCreatePoolModal(true)}
-          >
-            <Text style={styles.newPoolButtonText}>+ Host</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* Live Milestone Toast Banner */}
-      <LiveToastBanner
-        alert={liveToast}
-        onDismiss={() => setLiveToast(null)}
-        onPressBanner={() => {
-          setLiveToast(null);
-          setShowNotificationModal(true);
-        }}
-      />
-
-      {/* Horizontal Pool Selector */}
-      <View style={styles.poolSelectorWrap}>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.poolScrollContent}
-        >
-          {pools.map((pool) => {
-            const isSelected = pool.id === activePool.id;
-            const poolSummary = getPoolProgressSummary(pool);
-            return (
-              <TouchableOpacity
-                key={pool.id}
-                style={[
-                  styles.poolPill,
-                  isSelected && styles.poolPillSelected,
-                ]}
-                onPress={() => {
-                  setSelectedPoolId(pool.id);
-                  setSelectedCategory('All');
-                }}
-              >
-                <Text
-                  style={[
-                    styles.poolPillTitle,
-                    isSelected && styles.poolPillTitleSelected,
-                  ]}
-                  numberOfLines={1}
-                >
-                  {pool.status === 'locked' ? '🔒 ' : ''}
-                  {pool.title}
-                </Text>
-                <Text
-                  style={[
-                    styles.poolPillMeta,
-                    isSelected && styles.poolPillMetaSelected,
-                  ]}
-                >
-                  [{pool.joinCode}] ${poolSummary.combinedPoolTotal.toFixed(0)} / $
-                  {pool.minimumOrderAmount} min
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-      </View>
-
-      {/* Main Content */}
-      <ScrollView
-        style={styles.mainScroll}
-        contentContainerStyle={styles.mainScrollContent}
-      >
-        {/* Active Pool Banner */}
-        <View style={styles.supplierHeader}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.supplierBadgeText}>
-              {activePool.status === 'locked'
-                ? '🔒 POOL LOCKED • READY FOR ORDER & PICKUP'
-                : `${activePool.supplierBadge} • CODE: ${activePool.joinCode}`}
-            </Text>
-            <Text style={styles.poolMainTitle}>{activePool.title}</Text>
-            <Text style={styles.supplierSubText}>
-              Supplier: {activePool.supplierName} • Host: {activePool.hostName}
-            </Text>
+            <TouchableOpacity
+              style={styles.newPoolButton}
+              onPress={() => setShowCreatePoolModal(true)}
+            >
+              <Text style={styles.newPoolButtonText}>+ Host</Text>
+            </TouchableOpacity>
           </View>
         </View>
 
-        {/* Live Wholesale Minimum & Free Delivery Progress Bar */}
-        <PoolProgressCard pool={activePool} />
+        {/* Live Milestone Toast Banner */}
+        <LiveToastBanner
+          alert={liveToast}
+          onDismiss={() => setLiveToast(null)}
+          onPressBanner={() => {
+            setLiveToast(null);
+            setShowNotificationModal(true);
+          }}
+        />
 
-        {/* Navigation Tabs */}
-        <View style={styles.tabBar}>
-          <TouchableOpacity
-            style={[
-              styles.tabButton,
-              activeTab === 'catalog' && styles.tabButtonActive,
-            ]}
-            onPress={() => setActiveTab('catalog')}
+        {/* Horizontal Pool Selector */}
+        <View style={styles.poolSelectorWrap}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.poolScrollContent}
           >
-            <Text
-              style={[
-                styles.tabButtonText,
-                activeTab === 'catalog' && styles.tabButtonTextActive,
-              ]}
-            >
-              🛒 Shop
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.tabButton,
-              activeTab === 'splits' && styles.tabButtonActive,
-            ]}
-            onPress={() => setActiveTab('splits')}
-          >
-            <Text
-              style={[
-                styles.tabButtonText,
-                activeTab === 'splits' && styles.tabButtonTextActive,
-              ]}
-            >
-              💸 Splits
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.tabButton,
-              activeTab === 'chat' && styles.tabButtonActive,
-            ]}
-            onPress={() => setActiveTab('chat')}
-          >
-            <Text
-              style={[
-                styles.tabButtonText,
-                activeTab === 'chat' && styles.tabButtonTextActive,
-              ]}
-            >
-              💬 Chat ({messageCount})
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.tabButton,
-              activeTab === 'host_sheet' && styles.tabButtonActive,
-            ]}
-            onPress={() => setActiveTab('host_sheet')}
-          >
-            <Text
-              style={[
-                styles.tabButtonText,
-                activeTab === 'host_sheet' && styles.tabButtonTextActive,
-              ]}
-            >
-              📋 Host
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.tabButton,
-              activeTab === 'wallet' && styles.tabButtonActive,
-            ]}
-            onPress={() => setActiveTab('wallet')}
-          >
-            <Text
-              style={[
-                styles.tabButtonText,
-                activeTab === 'wallet' && styles.tabButtonTextActive,
-              ]}
-            >
-              💰 Wallet
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.tabButton,
-              activeTab === 'architecture' && styles.tabButtonActive,
-            ]}
-            onPress={() => setActiveTab('architecture')}
-          >
-            <Text
-              style={[
-                styles.tabButtonText,
-                activeTab === 'architecture' && styles.tabButtonTextActive,
-              ]}
-            >
-              ⚡ Sync
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {activeTab === 'catalog' && (
-          <View>
-            {/* Feature #1: Search Bar & Category Pills */}
-            <View style={styles.searchRow}>
-              <TextInput
-                style={styles.searchInput}
-                placeholder="🔍 Search wholesale items or bulk splits..."
-                value={searchQuery}
-                onChangeText={setSearchQuery}
-              />
-              {searchQuery.length > 0 && (
+            {pools.map((pool) => {
+              const isSelected = pool.id === activePool.id;
+              const poolSummary = getPoolProgressSummary(pool);
+              return (
                 <TouchableOpacity
-                  style={styles.clearSearchBtn}
-                  onPress={() => setSearchQuery('')}
-                >
-                  <Text style={styles.clearSearchText}>✕</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={styles.categoryScroll}
-              contentContainerStyle={{ gap: 6, paddingBottom: 6 }}
-            >
-              {availableCategories.map((cat) => (
-                <TouchableOpacity
-                  key={cat}
+                  key={pool.id}
                   style={[
-                    styles.catPill,
-                    selectedCategory === cat && styles.catPillActive,
+                    styles.poolPill,
+                    isSelected && styles.poolPillSelected,
                   ]}
-                  onPress={() => setSelectedCategory(cat)}
+                  onPress={() => {
+                    setSelectedPoolId(pool.id);
+                    setSelectedCategory('All');
+                  }}
                 >
                   <Text
                     style={[
-                      styles.catPillText,
-                      selectedCategory === cat && styles.catPillTextActive,
+                      styles.poolPillTitle,
+                      isSelected && styles.poolPillTitleSelected,
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {pool.status === 'locked' ? '🔒 ' : ''}
+                    {pool.title}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.poolPillMeta,
+                      isSelected && styles.poolPillMetaSelected,
                     ]}
                   >
-                    {cat}
+                    [{pool.joinCode}] ${poolSummary.combinedPoolTotal.toFixed(0)} / $
+                    {pool.minimumOrderAmount} min
                   </Text>
                 </TouchableOpacity>
-              ))}
-            </ScrollView>
+              );
+            })}
+          </ScrollView>
+        </View>
 
-            {/* Filter & Pitch Item Bar */}
-            <View style={styles.filterRow}>
-              <View style={styles.filterPills}>
-                {(
-                  [
-                    { key: 'all', label: 'All Modes' },
-                    { key: 'individual', label: 'Direct Wholesale' },
-                    { key: 'case_split', label: 'Bulk Case Splits' },
-                  ] as const
-                ).map((f) => (
+        {/* Main Content */}
+        <ScrollView
+          style={styles.mainScroll}
+          contentContainerStyle={styles.mainScrollContent}
+        >
+          {/* Active Pool Banner */}
+          <View style={styles.supplierHeader}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.supplierBadgeText}>
+                {activePool.status === 'locked'
+                  ? '🔒 POOL LOCKED • READY FOR ORDER & PICKUP'
+                  : `${activePool.supplierBadge} • CODE: ${activePool.joinCode}`}
+              </Text>
+              <Text style={styles.poolMainTitle}>{activePool.title}</Text>
+              <Text style={styles.supplierSubText}>
+                Supplier: {activePool.supplierName} • Host: {activePool.hostName}
+              </Text>
+            </View>
+          </View>
+
+          {/* Live Wholesale Minimum & Free Delivery Progress Bar */}
+          <PoolProgressCard pool={activePool} />
+
+          {/* Navigation Tabs */}
+          <View style={styles.tabBar}>
+            <TouchableOpacity
+              style={[
+                styles.tabButton,
+                activeTab === 'catalog' && styles.tabButtonActive,
+              ]}
+              onPress={() => setActiveTab('catalog')}
+            >
+              <Text
+                style={[
+                  styles.tabButtonText,
+                  activeTab === 'catalog' && styles.tabButtonTextActive,
+                ]}
+              >
+                🛒 Shop
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.tabButton,
+                activeTab === 'splits' && styles.tabButtonActive,
+              ]}
+              onPress={() => setActiveTab('splits')}
+            >
+              <Text
+                style={[
+                  styles.tabButtonText,
+                  activeTab === 'splits' && styles.tabButtonTextActive,
+                ]}
+              >
+                💸 Splits
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.tabButton,
+                activeTab === 'chat' && styles.tabButtonActive,
+              ]}
+              onPress={() => setActiveTab('chat')}
+            >
+              <Text
+                style={[
+                  styles.tabButtonText,
+                  activeTab === 'chat' && styles.tabButtonTextActive,
+                ]}
+              >
+                💬 Chat ({messageCount})
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.tabButton,
+                activeTab === 'host_sheet' && styles.tabButtonActive,
+              ]}
+              onPress={() => setActiveTab('host_sheet')}
+            >
+              <Text
+                style={[
+                  styles.tabButtonText,
+                  activeTab === 'host_sheet' && styles.tabButtonTextActive,
+                ]}
+              >
+                📋 Host
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.tabButton,
+                activeTab === 'wallet' && styles.tabButtonActive,
+              ]}
+              onPress={() => setActiveTab('wallet')}
+            >
+              <Text
+                style={[
+                  styles.tabButtonText,
+                  activeTab === 'wallet' && styles.tabButtonTextActive,
+                ]}
+              >
+                💰 Wallet
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.tabButton,
+                activeTab === 'architecture' && styles.tabButtonActive,
+              ]}
+              onPress={() => setActiveTab('architecture')}
+            >
+              <Text
+                style={[
+                  styles.tabButtonText,
+                  activeTab === 'architecture' && styles.tabButtonTextActive,
+                ]}
+              >
+                ⚡ Sync
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {activeTab === 'catalog' && (
+            <View>
+              {/* Feature #1: Search Bar & Category Pills */}
+              <View style={styles.searchRow}>
+                <TextInput
+                  style={styles.searchInput}
+                  placeholder="🔍 Search wholesale items or bulk splits..."
+                  value={searchQuery}
+                  onChangeText={setSearchQuery}
+                />
+                {searchQuery.length > 0 && (
                   <TouchableOpacity
-                    key={f.key}
+                    style={styles.clearSearchBtn}
+                    onPress={() => setSearchQuery('')}
+                  >
+                    <Text style={styles.clearSearchText}>✕</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={styles.categoryScroll}
+                contentContainerStyle={{ gap: 6, paddingBottom: 6 }}
+              >
+                {availableCategories.map((cat) => (
+                  <TouchableOpacity
+                    key={cat}
                     style={[
-                      styles.filterChip,
-                      itemFilter === f.key && styles.filterChipActive,
+                      styles.catPill,
+                      selectedCategory === cat && styles.catPillActive,
                     ]}
-                    onPress={() => setItemFilter(f.key)}
+                    onPress={() => setSelectedCategory(cat)}
                   >
                     <Text
                       style={[
-                        styles.filterChipText,
-                        itemFilter === f.key && styles.filterChipTextActive,
+                        styles.catPillText,
+                        selectedCategory === cat && styles.catPillTextActive,
                       ]}
                     >
-                      {f.label}
+                      {cat}
                     </Text>
                   </TouchableOpacity>
                 ))}
+              </ScrollView>
+
+              {/* Filter & Pitch Item Bar */}
+              <View style={styles.filterRow}>
+                <View style={styles.filterPills}>
+                  {(
+                    [
+                      { key: 'all', label: 'All Modes' },
+                      { key: 'individual', label: 'Direct Wholesale' },
+                      { key: 'case_split', label: 'Bulk Case Splits' },
+                    ] as const
+                  ).map((f) => (
+                    <TouchableOpacity
+                      key={f.key}
+                      style={[
+                        styles.filterChip,
+                        itemFilter === f.key && styles.filterChipActive,
+                      ]}
+                      onPress={() => setItemFilter(f.key)}
+                    >
+                      <Text
+                        style={[
+                          styles.filterChipText,
+                          itemFilter === f.key && styles.filterChipTextActive,
+                        ]}
+                      >
+                        {f.label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                {activePool.status !== 'locked' && (
+                  <TouchableOpacity
+                    style={styles.pitchItemBtn}
+                    onPress={() => setShowAddItemModal(true)}
+                  >
+                    <Text style={styles.pitchItemBtnText}>+ Add Item</Text>
+                  </TouchableOpacity>
+                )}
               </View>
 
-              {activePool.status !== 'locked' && (
-                <TouchableOpacity
-                  style={styles.pitchItemBtn}
-                  onPress={() => setShowAddItemModal(true)}
-                >
-                  <Text style={styles.pitchItemBtnText}>+ Add Item</Text>
-                </TouchableOpacity>
-              )}
-            </View>
+              {/* Items List */}
+              {filteredItems.map((item) => (
+                <CatalogItemCard
+                  key={item.id}
+                  item={item}
+                  currentUserId={activeUser.id}
+                  isPoolLocked={activePool.status === 'locked'}
+                  onUpdateQuantity={handleUpdateQuantity}
+                />
+              ))}
 
-            {/* Items List */}
-            {filteredItems.map((item) => (
-              <CatalogItemCard
-                key={item.id}
-                item={item}
-                currentUserId={activeUser.id}
-                isPoolLocked={activePool.status === 'locked'}
-                onUpdateQuantity={handleUpdateQuantity}
+              {/* Feature #1: Neighbor Bulk Split Wishlist & Upvotes */}
+              <WishlistSection
+                pool={activePool}
+                activeUser={activeUser}
+                isCurrentUserHost={isCurrentUserHost}
+                onPledgeWishlist={handlePledgeWishlist}
+                onPromoteWishlistToCatalog={handlePromoteWishlistToCatalog}
+                onAddWishlistRequest={handleAddWishlistRequest}
               />
-            ))}
+            </View>
+          )}
 
-            {/* Feature #1: Neighbor Bulk Split Wishlist & Upvotes */}
-            <WishlistSection
+          {activeTab === 'splits' && (
+            <SplitLedgerView
+              pool={activePool}
+              currentUserId={activeUser.id}
+              isCurrentUserHost={isCurrentUserHost}
+              onTogglePaidStatus={handleTogglePaidStatus}
+            />
+          )}
+
+          {activeTab === 'chat' && (
+            <PoolChatView
+              pool={activePool}
+              activeUser={activeUser}
+              onSendMessage={handleSendMessage}
+            />
+          )}
+
+          {activeTab === 'host_sheet' && (
+            <HostOrderSheetView
               pool={activePool}
               activeUser={activeUser}
               isCurrentUserHost={isCurrentUserHost}
-              onPledgeWishlist={handlePledgeWishlist}
-              onPromoteWishlistToCatalog={handlePromoteWishlistToCatalog}
-              onAddWishlistRequest={handleAddWishlistRequest}
+              onSwitchToHostProfile={handleSwitchToPoolHost}
+              onToggleLockPool={handleToggleLockPool}
+              onRerunWeeklyPool={handleRerunWeeklyPool}
+              onHostCoverRemainder={handleHostCoverRemainder}
+              onTrimPartialCase={handleTrimPartialCase}
+              onUpdateItemActualPrice={handleUpdateItemActualPrice}
+              onUpdateReceiptTrueUp={handleUpdateReceiptTrueUp}
+              onTogglePaidStatus={handleTogglePaidStatus}
+              onTogglePickedUp={handleTogglePickedUp}
             />
-          </View>
-        )}
+          )}
 
-        {activeTab === 'splits' && (
-          <SplitLedgerView
-            pool={activePool}
-            currentUserId={activeUser.id}
-            isCurrentUserHost={isCurrentUserHost}
-            onTogglePaidStatus={handleTogglePaidStatus}
-          />
-        )}
+          {activeTab === 'wallet' && (
+            <WalletHistoryView
+              pools={pools}
+              activePool={activePool}
+              activeUser={activeUser}
+              pastReceipts={PAST_USER_RECEIPTS}
+              onReclaimReceiptItems={handleReclaimReceiptItems}
+              onVerifyOtpEmail={handleVerifyOtpEmail}
+            />
+          )}
 
-        {activeTab === 'chat' && (
-          <PoolChatView
-            pool={activePool}
-            activeUser={activeUser}
-            onSendMessage={handleSendMessage}
-          />
-        )}
+          {activeTab === 'architecture' && (
+            <SupabaseSetupCard
+              activeUser={activeUser}
+              onSelectUser={handleSelectUser}
+              syncStatus={syncStatus}
+              onConfigSaved={handleConfigSaved}
+              onSimulateNeighborAction={handleSimulateNeighborAction}
+              onResetDemo={handleResetDemo}
+            />
+          )}
+        </ScrollView>
 
-        {activeTab === 'host_sheet' && (
-          <HostOrderSheetView
-            pool={activePool}
-            activeUser={activeUser}
-            isCurrentUserHost={isCurrentUserHost}
-            onSwitchToHostProfile={handleSwitchToPoolHost}
-            onToggleLockPool={handleToggleLockPool}
-            onRerunWeeklyPool={handleRerunWeeklyPool}
-            onHostCoverRemainder={handleHostCoverRemainder}
-            onTrimPartialCase={handleTrimPartialCase}
-            onUpdateItemActualPrice={handleUpdateItemActualPrice}
-            onUpdateReceiptTrueUp={handleUpdateReceiptTrueUp}
-            onTogglePaidStatus={handleTogglePaidStatus}
-            onTogglePickedUp={handleTogglePickedUp}
-          />
-        )}
-
-        {activeTab === 'wallet' && (
-          <WalletHistoryView
-            pools={pools}
-            activePool={activePool}
-            activeUser={activeUser}
-            pastReceipts={PAST_USER_RECEIPTS}
-            onReclaimReceiptItems={handleReclaimReceiptItems}
-            onVerifyOtpEmail={handleVerifyOtpEmail}
-          />
-        )}
-
-        {activeTab === 'architecture' && (
-          <SupabaseSetupCard
-            activeUser={activeUser}
-            onSelectUser={handleSelectUser}
-            syncStatus={syncStatus}
-            onConfigSaved={handleConfigSaved}
-            onSimulateNeighborAction={handleSimulateNeighborAction}
-            onResetDemo={handleResetDemo}
-          />
-        )}
-      </ScrollView>
-
-      {/* Sticky Personal Cart Footer */}
-      {myBreakdown && myBreakdown.totalDue > 0 && (
-        <View style={styles.stickyFooter}>
-          <View>
-            <Text style={styles.footerLabel}>
-              {activeUser.name.toUpperCase()} POOL SHARE (
-              {myBreakdown.lineItems.length} items)
-            </Text>
-            <View style={styles.footerPriceRow}>
-              <Text style={styles.footerTotal}>
-                ${myBreakdown.totalDue.toFixed(2)}
+        {/* Sticky Personal Cart Footer */}
+        {myBreakdown && myBreakdown.totalDue > 0 && (
+          <View style={styles.stickyFooter}>
+            <View>
+              <Text style={styles.footerLabel}>
+                {activeUser.name.toUpperCase()} POOL SHARE (
+                {myBreakdown.lineItems.length} items)
               </Text>
-              <Text style={styles.footerSavings}>
-                {' '}
-                • Saving ${myBreakdown.totalEstimatedSavings.toFixed(2)}
-              </Text>
+              <View style={styles.footerPriceRow}>
+                <Text style={styles.footerTotal}>
+                  ${myBreakdown.totalDue.toFixed(2)}
+                </Text>
+                <Text style={styles.footerSavings}>
+                  {' '}
+                  • Saving ${myBreakdown.totalEstimatedSavings.toFixed(2)}
+                </Text>
+              </View>
             </View>
+
+            <TouchableOpacity
+              style={styles.viewSplitButton}
+              onPress={() =>
+                setActiveTab(activeTab === 'splits' ? 'catalog' : 'splits')
+              }
+            >
+              <Text style={styles.viewSplitButtonText}>
+                {activeTab === 'splits'
+                  ? 'Back to Items'
+                  : summary.isMinimumMet
+                  ? 'Pay / Split ✓'
+                  : 'View Split Ledger'}
+              </Text>
+            </TouchableOpacity>
           </View>
+        )}
 
-          <TouchableOpacity
-            style={styles.viewSplitButton}
-            onPress={() =>
-              setActiveTab(activeTab === 'splits' ? 'catalog' : 'splits')
-            }
-          >
-            <Text style={styles.viewSplitButtonText}>
-              {activeTab === 'splits'
-                ? 'Back to Items'
-                : summary.isMinimumMet
-                ? 'Pay / Split ✓'
-                : 'View Split Ledger'}
-            </Text>
-          </TouchableOpacity>
-        </View>
-      )}
+        {/* Modals */}
+        <AddItemModal
+          visible={showAddItemModal}
+          activeUser={activeUser}
+          onClose={() => setShowAddItemModal(false)}
+          onAddItem={handleAddItem}
+        />
 
-      {/* Modals */}
-      <AddItemModal
-        visible={showAddItemModal}
-        activeUser={activeUser}
-        onClose={() => setShowAddItemModal(false)}
-        onAddItem={handleAddItem}
-      />
+        <CreatePoolModal
+          visible={showCreatePoolModal}
+          activeUser={activeUser}
+          onClose={() => setShowCreatePoolModal(false)}
+          onCreatePool={handleCreatePool}
+        />
 
-      <CreatePoolModal
-        visible={showCreatePoolModal}
-        activeUser={activeUser}
-        onClose={() => setShowCreatePoolModal(false)}
-        onCreatePool={handleCreatePool}
-      />
+        <JoinByCodeModal
+          visible={showJoinByCodeModal}
+          pools={pools}
+          onClose={() => setShowJoinByCodeModal(false)}
+          onSelectPoolId={(poolId) => {
+            setSelectedPoolId(poolId);
+            setActiveTab('catalog');
+          }}
+        />
 
-      <JoinByCodeModal
-        visible={showJoinByCodeModal}
-        pools={pools}
-        onClose={() => setShowJoinByCodeModal(false)}
-        onSelectPoolId={(poolId) => {
-          setSelectedPoolId(poolId);
-          setActiveTab('catalog');
-        }}
-      />
-
-      <NotificationCenterModal
-        visible={showNotificationModal}
-        pool={activePool}
-        alerts={alerts}
-        prefs={notifPrefs}
-        onClose={() => setShowNotificationModal(false)}
-        onTogglePref={handleToggleNotifPref}
-        onTriggerCutoffReminder={handleTriggerCutoffReminder}
-        onTriggerPorchReadyAlert={handleTriggerPorchReadyAlert}
-        onMarkAllRead={handleMarkAllAlertsRead}
-      />
-    </SafeAreaView>
+        <NotificationCenterModal
+          visible={showNotificationModal}
+          pool={activePool}
+          alerts={alerts}
+          prefs={notifPrefs}
+          onClose={() => setShowNotificationModal(false)}
+          onTogglePref={handleToggleNotifPref}
+          onTriggerCutoffReminder={handleTriggerCutoffReminder}
+          onTriggerPorchReadyAlert={handleTriggerPorchReadyAlert}
+          onMarkAllRead={handleMarkAllAlertsRead}
+        />
+      </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  outerShell: {
+    flex: 1,
+    backgroundColor: Platform.OS === 'web' ? '#E2E8F0' : '#F8FAFC',
+    alignItems: 'center',
+  },
   safeArea: {
     flex: 1,
+    width: '100%',
+    maxWidth: Platform.OS === 'web' ? 500 : undefined,
     backgroundColor: '#F8FAFC',
   },
   header: {
