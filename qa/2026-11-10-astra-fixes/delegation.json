@@ -5,8 +5,8 @@
   "requested_model": "GPT-6 Astra",
   "requested_effort": "High",
   "submission_status": "submitted",
-  "status": "blocked_school_quota",
-  "blocking_reason": null,
+  "status": "blocked_artifact_retrieval",
+  "blocking_reason": "Browser/download tool unavailable after interrupted download; implementation artifacts must be retrieved before independent verification and integration.",
   "contract": "task-contract.txt",
   "source": "current-source.txt",
   "chat_url": "https://chatgpt.com/c/6af3dc1e-ee68-83e8-b915-22e5471069c6",
@@ -17,7 +17,7 @@
   "verified_effort": "High",
   "mode": "Work",
   "upload_transport": "approved source pasted as native ChatGPT attachment Pasted text(4).txt",
-  "school_status": "blocked_quota_again",
+  "school_status": "exported_incomplete_artifacts",
   "school_observed_message": "You are out of Codex and Work usage. Workspace out of credits. Included usage resets at 5:06 AM.",
   "school_result": "No patch or changed-file artifact returned; response stopped after source reconstruction/approach commentary.",
   "school_process_state": "stopped_response_complete",
@@ -32,7 +32,7 @@
   "school_latest_result": "No final response or downloadable implementation artifact. Resumed turn ended after 7m50s.",
   "recovery_prompt_status": "drafted_not_submitted_due_to_quota",
   "pending_user_choice": null,
-  "updated_at": "2026-11-11T08:20:22.607987+00:00",
+  "updated_at": "2026-11-11T22:57:17.861212+00:00",
   "other_work_source_drift": [
     "src/data/mockPools.ts",
     "src/types/groupBuy.ts",
@@ -52,5 +52,19 @@
     "Recover/export saved sandbox work first; do not treat claims of saved work as applied or verified.",
     "Reconcile newly appeared local feature edits and refresh source handoff before applying code; obtain source transmission approval if required.",
     "Apply only a concrete reviewed implementation, then independently typecheck/test."
-  ]
+  ],
+  "scheduled_resume_at": "2026-11-11T13:09:09.384894+00:00",
+  "current_head_on_scheduled_resume": "696a2d6a3510dbb2f8e3919dc1eac242afdb4f58",
+  "scheduled_model_verified": "GPT-6 Astra",
+  "scheduled_effort_verified": "High",
+  "scheduled_operation": "Recover/export saved sandbox work before any integration or refreshed source transmission",
+  "school_exported_artifact_names": [
+    "poolcart-fixes-INCOMPLETE.zip",
+    "poolcart-fixes-INCOMPLETE.patch"
+  ],
+  "school_export_changed_files_claim": 10,
+  "school_export_baseline": "78d1061",
+  "artifact_retrieval_status": "not_verified; download call interrupted; browser tool unavailable",
+  "school_export_implementation_status": "incomplete; known component prop mismatches, payment UI, documentation and tests remain",
+  "scheduled_resume_result": "Astra High verified and export completed in school chat. No local patch verified or applied."
 }
