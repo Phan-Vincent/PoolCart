@@ -9,7 +9,7 @@ import {
 } from '../types/groupBuy';
 import { getPoolProgressSummary } from '../utils/calculations';
 
-const STORAGE_KEY_ALERTS = '@poolcart_alerts_v1';
+const STORAGE_KEY_ALERTS = '@poolcart_local_alerts_v2';
 const STORAGE_KEY_PREFS = '@poolcart_notif_prefs_v1';
 
 export const DEFAULT_NOTIFICATION_PREFS: NotificationPreferences = {
@@ -19,28 +19,7 @@ export const DEFAULT_NOTIFICATION_PREFS: NotificationPreferences = {
   porchDropArrival: true,
 };
 
-export const INITIAL_ALERTS: PoolNotificationAlert[] = [
-  {
-    id: 'alert_init_1',
-    poolId: 'pool_farm_box',
-    poolTitle: 'Inland Valley Organic Farm Direct',
-    category: 'case_locked',
-    title: '📦 Case #1 Locked: California Olive Oil!',
-    body: 'All 4/4 tin shares of Cold-Pressed California Olive Oil are claimed ($18.00/tin). Next claim automatically opens Case #2.',
-    createdAt: '6:42 PM',
-    read: false,
-  },
-  {
-    id: 'alert_init_2',
-    poolId: 'pool_farm_box',
-    poolTitle: 'Inland Valley Organic Farm Direct',
-    category: 'cutoff_reminder',
-    title: '⏰ 1 Share Needed Before Cutoff: Barista Oat Milk',
-    body: 'Barista Organic Oat Milk is at 5/6 cartons claimed! Claim 1 more carton ($3.25) so the full case ships.',
-    createdAt: '7:10 PM',
-    read: false,
-  },
-];
+export const INITIAL_ALERTS: PoolNotificationAlert[] = [];
 
 function nowTimeLabel(): string {
   const now = new Date();
@@ -65,7 +44,7 @@ export const NotificationService = {
     try {
       await AsyncStorage.setItem(STORAGE_KEY_ALERTS, JSON.stringify(alerts.slice(0, 40)));
     } catch (err) {
-      console.warn('Failed to save alerts:', err);
+      throw err;
     }
   },
 
@@ -83,7 +62,7 @@ export const NotificationService = {
     try {
       await AsyncStorage.setItem(STORAGE_KEY_PREFS, JSON.stringify(prefs));
     } catch (err) {
-      console.warn('Failed to save notification prefs:', err);
+      throw err;
     }
   },
 

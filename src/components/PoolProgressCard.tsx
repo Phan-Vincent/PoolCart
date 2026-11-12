@@ -16,7 +16,7 @@ export const PoolProgressCard: React.FC<Props> = ({ pool }) => {
     <View style={styles.card}>
       <View style={styles.topRow}>
         <View>
-          <Text style={styles.label}>POOL WHOLESALE TOTAL</Text>
+          <Text style={styles.label}>COMMITTED WHOLESALE TOTAL</Text>
           <View style={styles.amountRow}>
             <Text style={styles.currentAmount}>${summary.combinedPoolTotal.toFixed(2)}</Text>
             <Text style={styles.targetAmount}> / ${pool.minimumOrderAmount} min</Text>
@@ -55,12 +55,14 @@ export const PoolProgressCard: React.FC<Props> = ({ pool }) => {
       {/* Free Delivery Tier Progress */}
       <View style={styles.tierRow}>
         <Text style={styles.tierLabel}>
-          {summary.isFreeDeliveryUnlocked
+          {summary.isFreeDeliveryUnlocked && summary.effectiveDeliveryFee === 0
             ? `🎉 Free wholesale delivery unlocked! ($${pool.freeDeliveryThreshold}+ reached)`
+            : pool.trueUp?.actualDeliveryFee !== undefined ? `Receipt delivery fee: $${summary.effectiveDeliveryFee.toFixed(2)}`
             : `🚚 Add $${summary.amountNeededForFreeDelivery.toFixed(2)} more to waive the $${pool.deliveryFee} delivery fee (${freeDelivPercent}%)`}
         </Text>
       </View>
 
+      {summary.pendingCaseTotal > 0 && <Text style={styles.tierLabel}>Pending case shares: ${summary.pendingCaseTotal.toFixed(2)} (excluded from thresholds and payment)</Text>}
       {/* Quick Stats */}
       <View style={styles.statsFooter}>
         <View style={styles.statBox}>
@@ -70,7 +72,7 @@ export const PoolProgressCard: React.FC<Props> = ({ pool }) => {
         <View style={styles.divider} />
         <View style={styles.statBox}>
           <Text style={styles.statValue}>
-            {summary.isFreeDeliveryUnlocked
+            {summary.effectiveDeliveryFee === 0
               ? '$0.00'
               : `$${summary.currentDeliveryFeePerPerson.toFixed(2)}/person`}
           </Text>

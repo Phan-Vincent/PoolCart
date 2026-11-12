@@ -5,7 +5,9 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
+  Alert,
 } from 'react-native';
+import { requireNumber } from '../utils/poolActions';
 import { GroupBuyPool, Participant, WishlistRequest } from '../types/groupBuy';
 
 interface Props {
@@ -25,6 +27,7 @@ export const WishlistSection: React.FC<Props> = ({
   onPromoteWishlistToCatalog,
   onAddWishlistRequest,
 }) => {
+  const [formError, setFormError] = useState('');
   const [showPitchForm, setShowPitchForm] = useState(false);
   const [title, setTitle] = useState('');
   const [emoji, setEmoji] = useState('🥐');
@@ -36,8 +39,12 @@ export const WishlistSection: React.FC<Props> = ({
 
   const handleCreateWish = () => {
     if (!title.trim()) return;
-    const price = parseFloat(estPrice) || 8;
-    const cases = parseInt(targetCaseSize, 10) || 5;
+    if (pool.status === 'locked') return;
+    let price: number, cases: number;
+    try {
+      price = requireNumber(Number(estPrice), 'Estimated unit price', 0.01);
+      cases = requireNumber(Number(targetCaseSize), 'Shares per case', 2, true, 1000);
+    } catch (error) { setFormError(String(error)); return; }
 
     onAddWishlistRequest({
       title: title.trim(),
@@ -45,7 +52,7 @@ export const WishlistSection: React.FC<Props> = ({
       category: 'Neighbor Request',
       suggestedUnitLabel: unitLabel.trim() || '1 share',
       estimatedUnitPrice: price,
-      estimatedRetailPrice: Number((price * 1.45).toFixed(2)),
+      estimatedRetailPrice: price,
       targetCaseSize: cases,
       requestedByUserId: activeUser.id,
       requestedByUserName: activeUser.name,
@@ -71,6 +78,7 @@ export const WishlistSection: React.FC<Props> = ({
         <TouchableOpacity
           style={styles.requestBtn}
           onPress={() => setShowPitchForm(!showPitchForm)}
+          disabled={pool.status === 'locked'}
         >
           <Text style={styles.requestBtnText}>
             {showPitchForm ? 'Close' : '+ Request Split'}
@@ -78,6 +86,7 @@ export const WishlistSection: React.FC<Props> = ({
         </TouchableOpacity>
       </View>
 
+      {!!formError && <Text style={{ color: '#B91C1C' }}>{formError}</Text>}
       {showPitchForm && (
         <View style={styles.pitchFormCard}>
           <Text style={styles.formTitle}>
@@ -151,6 +160,7 @@ export const WishlistSection: React.FC<Props> = ({
                   hasPledged && styles.pledgeButtonActive,
                 ]}
                 onPress={() => onPledgeWishlist(w.id)}
+                disabled={pool.status === 'locked'}
               >
                 <Text
                   style={[
@@ -176,6 +186,7 @@ export const WishlistSection: React.FC<Props> = ({
                 <TouchableOpacity
                   style={styles.promoteBtn}
                   onPress={() => onPromoteWishlistToCatalog(w)}
+                  disabled={pool.status === 'locked'}
                 >
                   <Text style={styles.promoteBtnText}>
                     + Approve & Add to Catalog

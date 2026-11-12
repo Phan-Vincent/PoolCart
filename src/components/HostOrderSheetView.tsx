@@ -33,7 +33,7 @@ interface Props {
   onUpdateItemActualPrice: (itemId: string, actualPrice: number | undefined) => void;
   onUpdateReceiptTrueUp: (trueUp: ReceiptTrueUp) => void;
   onOpenBulkImportModal: (mode: 'catalog_import' | 'receipt_ocr') => void;
-  onCaptureAllStripeHolds: () => void;
+  onCaptureAllDemoHolds: () => void;
   onUpdatePorchCheckIn: (checkIn: PorchDropCheckIn) => void;
   onTogglePaidStatus: (userId: string) => void;
   onTogglePickedUp: (userId: string) => void;
@@ -51,7 +51,7 @@ export const HostOrderSheetView: React.FC<Props> = ({
   onUpdateItemActualPrice,
   onUpdateReceiptTrueUp,
   onOpenBulkImportModal,
-  onCaptureAllStripeHolds,
+  onCaptureAllDemoHolds,
   onUpdatePorchCheckIn,
   onTogglePaidStatus,
   onTogglePickedUp,
@@ -69,11 +69,10 @@ export const HostOrderSheetView: React.FC<Props> = ({
   );
 
   const [coolerNoteInput, setCoolerNoteInput] = useState(
-    pool.porchCheckIn?.coolerLocationNote ||
-      'Blue Yeti cooler on covered front porch by the planter box.'
+    pool.porchCheckIn?.coolerLocationNote || ''
   );
   const [accessPinInput, setAccessPinInput] = useState(
-    pool.porchCheckIn?.accessCodeOrPin || 'Gate #1492'
+    pool.porchCheckIn?.accessCodeOrPin || ''
   );
   const [porchStatus, setPorchStatus] = useState<PorchDropCheckIn['status']>(
     pool.porchCheckIn?.status || 'waiting_delivery'
@@ -86,7 +85,7 @@ export const HostOrderSheetView: React.FC<Props> = ({
   );
 
   const stripeAuthorizedMembers = breakdowns.filter(
-    (b) => b.paidStatus === 'stripe_authorized'
+    (b) => b.paidStatus === 'demo_authorized'
   );
   const totalAuthorizedHoldAmount = stripeAuthorizedMembers.reduce(
     (sum, b) => sum + b.totalDue,
@@ -108,18 +107,16 @@ export const HostOrderSheetView: React.FC<Props> = ({
   };
 
   const handleApplyTrueUp = () => {
-    const parsedTax = parseFloat(taxFeeInput) || 0;
+    const parsedTax = taxFeeInput.trim() ? Number(taxFeeInput) : 0;
     const parsedDeliv =
       deliveryOverrideInput.trim() !== ''
-        ? parseFloat(deliveryOverrideInput)
+        ? Number(deliveryOverrideInput)
         : undefined;
 
     onUpdateReceiptTrueUp({
       taxOrBagFee: parsedTax,
       actualDeliveryFee:
-        parsedDeliv !== undefined && !isNaN(parsedDeliv)
-          ? parsedDeliv
-          : undefined,
+        parsedDeliv,
       receiptNote:
         receiptNoteInput.trim() ||
         'Reconciled against final wholesale register receipt',
@@ -138,8 +135,8 @@ export const HostOrderSheetView: React.FC<Props> = ({
       accessCodeOrPin: accessPinInput.trim(),
       photoLabel:
         nextStatus === 'ready_on_porch'
-          ? '📸 Verified Porch Cooler Drop Ready'
-          : '📸 Porch Drop Zone',
+          ? 'Porch location note (no photo)'
+          : 'Porch location note (no photo)',
       updatedAt: new Date().toLocaleTimeString([], {
         hour: '2-digit',
         minute: '2-digit',
@@ -163,12 +160,12 @@ export const HostOrderSheetView: React.FC<Props> = ({
         <View style={styles.roleGuardBanner}>
           <View style={{ flex: 1, paddingRight: 10 }}>
             <Text style={styles.roleGuardTitle}>
-              🔒 Read-Only Neighbor View (Host Role Guard Active)
+              🔒 Neighbor view — local demo permissions
             </Text>
             <Text style={styles.roleGuardSub}>
               You are viewing as{' '}
               <Text style={{ fontWeight: '800' }}>{activeUser.name}</Text>. Only
-              the verified Pool Host (
+              the selected demo Pool Host (
               <Text style={{ fontWeight: '800' }}>{pool.hostName}</Text>) can
               lock the pool, reconcile receipts, or capture payment holds.
             </Text>
@@ -178,7 +175,7 @@ export const HostOrderSheetView: React.FC<Props> = ({
             onPress={onSwitchToHostProfile}
           >
             <Text style={styles.switchHostBtnText}>
-              🔑 Act as {pool.hostName.split(' ')[0]}
+              Switch demo profile: {pool.hostName.split(' ')[0]}
             </Text>
           </TouchableOpacity>
         </View>
@@ -234,7 +231,7 @@ export const HostOrderSheetView: React.FC<Props> = ({
               !isCurrentUserHost && styles.disabledBtn,
             ]}
             onPress={() => onOpenBulkImportModal('catalog_import')}
-            disabled={!isCurrentUserHost}
+            disabled={!isCurrentUserHost || isLocked}
           >
             <Text style={styles.importShortcutText}>
               📋 Bulk Paste Supplier List
@@ -256,17 +253,17 @@ export const HostOrderSheetView: React.FC<Props> = ({
         <View style={styles.controlHeaderRow}>
           <View style={{ flex: 1, paddingRight: 10 }}>
             <Text style={styles.stripeBadge}>
-              💳 STRIPE PAYMENTINTENT PRE-AUTH HOLDS (MANUAL CAPTURE)
+              DEMO CARD HOLDS — NO FUNDS MOVE
             </Text>
             <Text style={styles.stripeTitle}>
               {stripeAuthorizedMembers.length > 0
-                ? `${stripeAuthorizedMembers.length} Neighbor Hold(s) Ready ($${totalAuthorizedHoldAmount.toFixed(2)})`
-                : 'No Pending Card Holds to Capture'}
+                ? `${stripeAuthorizedMembers.length} Demo hold(s) ($${totalAuthorizedHoldAmount.toFixed(2)})`
+                : 'No simulated holds'}
             </Text>
             <Text style={styles.stripeSub}>
               {summary.isMinimumMet
-                ? 'Wholesale minimum is met! Capture all authorized card holds in 1 tap to settle the pool.'
-                : `Card holds can only be captured once the $${pool.minimumOrderAmount} wholesale minimum is met.`}
+                ? 'Simulate capture after the finalized pool is locked. This does not record a real payment.'
+                : `Demo holds require a locked pool meeting the $${pool.minimumOrderAmount} wholesale minimum.`}
             </Text>
           </View>
 
@@ -275,17 +272,17 @@ export const HostOrderSheetView: React.FC<Props> = ({
               styles.captureAllBtn,
               (!isCurrentUserHost ||
                 stripeAuthorizedMembers.length === 0 ||
-                !summary.isMinimumMet) &&
+                !summary.isMinimumMet || !isLocked) &&
                 styles.disabledBtn,
             ]}
-            onPress={onCaptureAllStripeHolds}
+            onPress={onCaptureAllDemoHolds}
             disabled={
               !isCurrentUserHost ||
               stripeAuthorizedMembers.length === 0 ||
-              !summary.isMinimumMet
+              !summary.isMinimumMet || !isLocked
             }
           >
-            <Text style={styles.captureAllBtnText}>⚡ Capture All</Text>
+            <Text style={styles.captureAllBtnText}>Simulate capture</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -334,7 +331,7 @@ export const HostOrderSheetView: React.FC<Props> = ({
                       pItem.neededToFillNextCase
                     )
                   }
-                  disabled={!isCurrentUserHost}
+                  disabled={!isCurrentUserHost || isLocked}
                 >
                   <Text style={styles.coverBtnText}>
                     + Cover {pItem.neededToFillNextCase}
@@ -347,7 +344,7 @@ export const HostOrderSheetView: React.FC<Props> = ({
                     !isCurrentUserHost && styles.disabledBtn,
                   ]}
                   onPress={() => onTrimPartialCase(pItem.itemId)}
-                  disabled={!isCurrentUserHost}
+                  disabled={!isCurrentUserHost || isLocked}
                 >
                   <Text style={styles.trimBtnText}>Drop Partial</Text>
                 </TouchableOpacity>
@@ -362,10 +359,10 @@ export const HostOrderSheetView: React.FC<Props> = ({
         <View style={styles.manifestHeaderRow}>
           <View style={{ flex: 1, paddingRight: 8 }}>
             <Text style={styles.sectionLabel}>
-              🧾 WHOLESALE RECEIPT TRUE-UP & OCR SCANNER
+              🧾 WHOLESALE RECEIPT TRUE-UP
             </Text>
             <Text style={styles.trueUpSub}>
-              Adjust unit prices or scan/paste your wholesale register receipt so
+              Adjust unit prices or paste explicit per-unit receipt text so
               every neighbor’s split updates pro-rata automatically.
             </Text>
           </View>
@@ -378,7 +375,7 @@ export const HostOrderSheetView: React.FC<Props> = ({
             onPress={() => onOpenBulkImportModal('receipt_ocr')}
             disabled={!isCurrentUserHost}
           >
-            <Text style={styles.ocrScanButtonText}>📸 Scan Receipt</Text>
+            <Text style={styles.ocrScanButtonText}>Paste receipt text</Text>
           </TouchableOpacity>
         </View>
 
@@ -495,7 +492,7 @@ export const HostOrderSheetView: React.FC<Props> = ({
           🧊 PORCH COOLER DROP-OFF CHECK-IN & ACCESS PIN
         </Text>
         <Text style={styles.trueUpSub}>
-          Let neighbors know where the insulated coolers are placed and broadcast
+          Let neighbors know where the insulated coolers are placed and record locally
           when shares are sorted and ready for pickup:
         </Text>
 
@@ -650,7 +647,7 @@ export const HostOrderSheetView: React.FC<Props> = ({
               </View>
               <Text style={styles.pickupItemsSummary}>
                 {b.lineItems
-                  .map((li) => `${li.emoji} ${li.itemName} ×${li.quantity}`)
+                  .map((li) => `${li.emoji} ${li.itemName} ×${li.committedQuantity} (${li.pendingQuantity} pending)`)
                   .join('  |  ')}
               </Text>
             </View>
@@ -661,27 +658,28 @@ export const HostOrderSheetView: React.FC<Props> = ({
                   styles.smallStatusChip,
                   b.paidStatus === 'paid'
                     ? styles.chipGreen
-                    : b.paidStatus === 'stripe_authorized'
+                    : b.paidStatus === 'demo_authorized'
                     ? styles.chipPurple
                     : styles.chipAmber,
                 ]}
                 onPress={() => onTogglePaidStatus(b.userId)}
-                disabled={!isCurrentUserHost}
+                disabled={!isCurrentUserHost || !isLocked}
               >
                 <Text
                   style={[
                     styles.smallChipText,
                     b.paidStatus === 'paid'
                       ? styles.chipTextGreen
-                      : b.paidStatus === 'stripe_authorized'
+                      : b.paidStatus === 'demo_authorized'
                       ? styles.chipTextPurple
                       : styles.chipTextAmber,
                   ]}
                 >
                   {b.paidStatus === 'paid'
-                    ? '✓ Paid'
-                    : b.paidStatus === 'stripe_authorized'
-                    ? '💳 Hold Ready'
+                    ? '✓ Manually confirmed'
+                    : b.paidStatus === 'demo_authorized'
+                    ? 'Demo hold'
+                    : b.paidStatus === 'demo_paid' ? 'Demo captured'
                     : 'Unpaid'}
                 </Text>
               </TouchableOpacity>
@@ -692,7 +690,7 @@ export const HostOrderSheetView: React.FC<Props> = ({
                   b.pickedUp ? styles.chipTeal : styles.chipGray,
                 ]}
                 onPress={() => onTogglePickedUp(b.userId)}
-                disabled={!isCurrentUserHost}
+                disabled={!isCurrentUserHost || !isLocked}
               >
                 <Text
                   style={[

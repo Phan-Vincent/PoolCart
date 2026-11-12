@@ -49,6 +49,7 @@ export const LiveToastBanner: React.FC<ToastBannerProps> = ({
 
 interface NotificationCenterModalProps {
   visible: boolean;
+  canNotifyPorch: boolean;
   pool: GroupBuyPool;
   alerts: PoolNotificationAlert[];
   prefs: NotificationPreferences;
@@ -61,6 +62,7 @@ interface NotificationCenterModalProps {
 
 export const NotificationCenterModal: React.FC<NotificationCenterModalProps> = ({
   visible,
+  canNotifyPorch,
   pool,
   alerts,
   prefs,
@@ -76,9 +78,9 @@ export const NotificationCenterModal: React.FC<NotificationCenterModalProps> = (
         <View style={styles.sheet}>
           <View style={styles.headerRow}>
             <View>
-              <Text style={styles.title}>🔔 Smart Pool Alerts & Reminders</Text>
+              <Text style={styles.title}>🔔 Local Pool Alerts & Preferences</Text>
               <Text style={styles.subtitle}>
-                Automated cutoff countdowns, case-lock alerts & porch pickup pings
+                On-device feed only. No background scheduler or push service is connected.
               </Text>
             </View>
             <TouchableOpacity style={styles.markReadBtn} onPress={onMarkAllRead}>
@@ -90,24 +92,26 @@ export const NotificationCenterModal: React.FC<NotificationCenterModalProps> = (
             {/* Host & Demo Instant Push Broadcast Triggers */}
             <View style={styles.sectionBox}>
               <Text style={styles.sectionHeader}>
-                ⚡ TEST / SEND INSTANT PUSH REMINDERS ({pool.joinCode})
+                ⚡ CREATE LOCAL REMINDERS ({pool.joinCode})
               </Text>
               <View style={styles.triggerRow}>
                 <TouchableOpacity
                   style={styles.triggerBtnAmber}
                   onPress={onTriggerCutoffReminder}
+                  disabled={!prefs.cutoffReminder2h}
                 >
                   <Text style={styles.triggerBtnAmberText}>
-                    ⏰ Send 2h Cutoff Reminder
+                    Show Cutoff Reminder
                   </Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
                   style={styles.triggerBtnTeal}
                   onPress={onTriggerPorchReadyAlert}
+                  disabled={!canNotifyPorch || !prefs.porchDropArrival}
                 >
                   <Text style={styles.triggerBtnTealText}>
-                    📦 Send "Porch Pickup Ready!"
+                    Show Porch Ready Alert
                   </Text>
                 </TouchableOpacity>
               </View>
@@ -116,7 +120,7 @@ export const NotificationCenterModal: React.FC<NotificationCenterModalProps> = (
             {/* Notification Preferences Toggles */}
             <View style={styles.sectionBox}>
               <Text style={styles.sectionHeader}>
-                ⚙️ AUTOMATED NOTIFICATION TRIGGERS
+                ⚙️ LOCAL ALERT PREFERENCES
               </Text>
 
               {(
@@ -131,7 +135,7 @@ export const NotificationCenterModal: React.FC<NotificationCenterModalProps> = (
                   },
                   {
                     key: 'cutoffReminder2h',
-                    label: '⏰ 2-Hour Order Cutoff & Unfilled Case Reminders',
+                    label: '⏰ Manual Cutoff Reminders',
                   },
                   {
                     key: 'porchDropArrival',

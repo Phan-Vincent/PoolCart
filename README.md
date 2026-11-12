@@ -1,34 +1,51 @@
-# PoolCart — Grocery Group Buy Mobile App (Expo + React Native)
+# PoolCart — Neighborhood Grocery Group-Buy (Local Demo & Authenticated Cloud Sync)
 
-PoolCart is a cross-platform mobile application (iOS, Android, and Web via Expo) built for **pooling neighborhood grocery orders to hit wholesale/delivery minimums** AND **splitting bulk cases** (like a 6-pack of barista oat milk or a 50 lb sack of jasmine rice) across neighbors.
+Expo / React Native / TypeScript application for neighborhood wholesale orders and bulk-case shares. Supports both **local single-device demonstration mode** and an **authenticated Supabase cloud sync path** backed by member-scoped Row-Level Security (RLS) and transactional PostgreSQL RPCs.
 
-## Why Start With This Architecture?
+## Working journeys
 
-1. **Order Pooling + Case Splitting Hybrid**:
-   - **Direct Wholesale Items (`individual` mode)**: Neighbors order full units (e.g., a 12-count bag of avocados or a 30-egg flat) that combine toward the supplier's **$250 minimum order** and **$300 free delivery tier**.
-   - **Bulk Case Splits (`case_split` mode)**: Neighbors claim individual shares of a bulk wholesale case (e.g., 1 carton out of a 6-pack case). Visual slot bars track how many shares are claimed (`4/6 claimed`) and automatically roll completed cases into the pool total.
-2. **Pragmatic Backend Path (Local-First $\rightarrow$ Supabase)**:
-   - **Right now (Zero Setup)**: Uses `AsyncStorage` (`src/services/repository.ts`) so you can run the app immediately, test adding items, claim shares, and mark neighbors as paid without configuring cloud keys.
-   - **When inviting real neighbors**: Run `supabase/schema.sql` in a free [Supabase](https://supabase.com/) project and add `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_ANON_KEY` to a `.env` file. Supabase gives you Postgres relational integrity (preventing two people from claiming the last share of a case at the same time) plus **Supabase Realtime** so the wholesale progress bar updates live on everyone's phone.
+- Browse sample/local pools in local mode or connect to a Supabase project with an authenticated session to join and host shared cloud pools.
+- Use invite codes (`join_pool_by_invite` in cloud mode) or incoming `poolcart://join/CODE` links, and create pools from supplier templates or rerun existing catalogs.
+- Order direct units, claim case shares with caps, search/filter products, request wishlist items, and promote pledges into catalog claims.
+- Resolve partial cases by covering the remainder or dropping pending shares. Lock only a complete order that meets its supplier minimum.
+- Paste catalog rows and explicit per-unit receipt text; review parse errors and matches before applying.
+- Reconcile actual prices and fees, inspect per-neighbor totals, export supplier order text, and record porch status/pickup.
+- Open Venmo separately for the active user's finalized share. Only the host can manually confirm receipt of payment; opening a link never marks a payment received.
+- Simulate card authorization and capture in local demo mode with explicitly separate **demo** statuses (`demo_authorized`, `demo_paid`) that move no funds and are never persisted as cloud payment records.
+- Reorder sample history and rerun a catalog with a newly entered schedule and clean transactional state (`claims: []`, cleared `trueUp`, `porchCheckIn`, `wishlist`, `actualUnitPrice`, and settlement statuses).
 
-## Project Structure
+## Accounting rules
 
-- `App.tsx` — Main mobile screen with pool switcher, live wholesale minimum progress, item filters, and sticky personal cart bar.
-- `src/types/groupBuy.ts` — TypeScript domain models for pools, wholesale items, case splits, and settlement ledgers.
-- `src/utils/calculations.ts` — Core math engine for wholesale minimum progress, free delivery fee waivers, case-split matching, and per-neighbor cost breakdowns.
-- `src/components/PoolProgressCard.tsx` — Visual tracker for the supplier order minimum, free delivery threshold, per-person delivery split, and total group savings.
-- `src/components/CatalogItemCard.tsx` — Item card supporting both direct wholesale units and visual slot bars for bulk case splits.
-- `src/components/SplitLedgerView.tsx` — Host pickup logistics and itemized per-neighbor cost split & payment status tracker.
-- `src/components/ActionModals.tsx` — Modals for pitching new items/case splits to a pool and hosting a new neighborhood group buy.
-- `src/services/repository.ts` — Storage adapter supporting local `AsyncStorage` out-of-the-box and optional Supabase cloud sync.
-- `supabase/schema.sql` — Ready-to-run PostgreSQL schema with Realtime publications enabled.
+Only direct items and completed-case units count toward supplier thresholds, invoices, and payable amounts. Pending units remain visible but are not payable. Completed units are allocated by **claim-entry order** (`claim_seq` in PostgreSQL). Dropping a partial case removes claims from the end of that same order. Reordering is atomic: a cap violation rejects the whole action.
 
-## Running the App
+Delivery is divided across participants with committed units. Receipt fees are proportional to committed merchandise. Largest-remainder allocation assigns exact cents, with participant ID breaking ties. Prices require positive finite values with at most two decimals; fees cannot be negative. Reported savings include delivery and receipt fees and may therefore be negative.
 
-```bash
-cd "/Users/vincentphan/grocery groupbuy"
-npm install
-npx expo start
+Changing quantities, allocation, prices, or an amount due invalidates affected hold/payment records and pickup status. Receipt adjustments may be made after locking; settlement checks the current committed minimum and absence of partial cases.
+
+## Persistence, Cloud Architecture & Migration
+
+- **Local Storage**: Full pool objects are stored in AsyncStorage via a serialized write queue. Unreadable or invalid stored pool data is not silently overwritten with fixtures.
+- **Authenticated Cloud Sync**:
+  - Cloud identity is derived strictly from the authenticated Supabase session (`auth.uid()`) and server-side `user_profiles` / `pool_participants` records—never from caller-supplied demo user IDs, names, `isHost`, or `verifiedAuth` flags.
+  - Demo profile switching and simulated card holds are confined to local demo mode.
+  - Sample fixtures (`INITIAL_POOLS`) are never uploaded automatically when connecting to a cloud project or encountering an empty database.
+  - Distinguishes `local_mode`, `auth_required`, `empty_cloud`, `synced`, `auth_rejected`, `network_unavailable`, and `schema_or_query_error`, preserving unsaved local edits in `@poolcart_pending_cloud_edits_v1` for explicit retry rather than silently presenting rejected changes as cloud success.
+  - Persists and reloads rich domain state (`host_user_id`, `distance_miles`, `true_up`, `porch_check_in`, `wishlist`, `actual_unit_price`, `settled_amount`, `claim_seq`, and `pool_messages`).
+- **Non-Destructive SQL Migration (`supabase/schema.sql`)**:
+  - Retains `text` primary keys (`pools.id`, `pool_participants.user_id`, `catalog_items.id`) for backward compatibility with existing records and adds rich domain columns via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
+  - Enforces member-only `SELECT` policies (`public.is_pool_member`) so non-members cannot read unrelated pools, pickup addresses, or porch gate PINs.
+  - Revokes direct client `INSERT`/`UPDATE`/`DELETE` on tables and routes all mutations through transactional `SECURITY DEFINER` RPCs (`upsert_my_profile`, `join_pool_by_invite`, `create_pool_with_catalog`, `claim_item_share`, `apply_pool_action_rpc`) using `FOR UPDATE` row locks.
+
+## Integration boundaries
+
+No real payment processor (Stripe/Venmo API), third-party SMS/email OTP provider beyond standard Supabase Auth password/email session support, camera OCR, push notification transport, background reminder scheduler, or QR image encoder is connected. Review and test `supabase/schema.sql` in a staging Supabase environment before applying to any production project.
+
+## Development and validation
+
+```sh
+npm test
+npm run typecheck
+npm run build:web
 ```
 
-- Press **`i`** to open in the iOS Simulator, **`a`** for Android Emulator, **`w`** for Web, or scan the QR code with the **Expo Go** app on your phone.
+`npm test` runs domain, math, parser, storage write-queue, behavioral rerun callback, rich-field round-trip, and stateful SQL/RPC authorization & concurrency simulation tests. These tests run in Node without starting a live PostgreSQL instance, browser, or external network connection.

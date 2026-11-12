@@ -1,7 +1,7 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { CatalogItem } from '../types/groupBuy';
-import { getCaseSplitStatus } from '../utils/calculations';
+import { getCaseSplitStatus, getEffectiveUnitPrice } from '../utils/calculations';
 
 interface Props {
   item: CatalogItem;
@@ -20,7 +20,7 @@ export const CatalogItemCard: React.FC<Props> = ({
   const myQty = userClaim ? userClaim.quantity : 0;
   const caseStatus = getCaseSplitStatus(item);
   const savingsPct = Math.round(
-    ((item.retailPrice - item.unitPrice) / item.retailPrice) * 100
+    ((item.retailPrice - getEffectiveUnitPrice(item)) / item.retailPrice) * 100
   );
 
   const isMaxCasesCapped =
@@ -126,7 +126,7 @@ export const CatalogItemCard: React.FC<Props> = ({
           <Text style={styles.unitLabel}>{item.unitLabel}</Text>
 
           <View style={styles.priceRow}>
-            <Text style={styles.unitPrice}>${item.unitPrice.toFixed(2)}</Text>
+            <Text style={styles.unitPrice}>${getEffectiveUnitPrice(item).toFixed(2)}</Text>
             <Text style={styles.retailPrice}>${item.retailPrice.toFixed(2)} retail</Text>
           </View>
         </View>
@@ -180,7 +180,7 @@ export const CatalogItemCard: React.FC<Props> = ({
           )}
           {myQty > 0 && (
             <Text style={styles.mySubtotalText}>
-              You: ${(myQty * item.unitPrice).toFixed(2)}
+              You: ${(myQty * getEffectiveUnitPrice(item)).toFixed(2)}
             </Text>
           )}
         </View>

@@ -15,7 +15,7 @@ interface Props {
   currentUserId: string;
   isCurrentUserHost: boolean;
   onTogglePaidStatus: (userId: string) => void;
-  onAuthorizeStripeHold: (userId: string, amount: number) => void;
+  onAuthorizeDemoHold: (userId: string, amount: number) => void;
 }
 
 export const SplitLedgerView: React.FC<Props> = ({
@@ -23,10 +23,11 @@ export const SplitLedgerView: React.FC<Props> = ({
   currentUserId,
   isCurrentUserHost,
   onTogglePaidStatus,
-  onAuthorizeStripeHold,
+  onAuthorizeDemoHold,
 }) => {
   const breakdowns = getParticipantBreakdowns(pool);
-  const venmoHandle = pool.hostVenmoHandle || 'PoolCart-Host';
+  const venmoHandle = pool.hostVenmoHandle?.trim().replace(/^@/, '') || '';
+
   const porch = pool.porchCheckIn;
 
   const handlePayWithVenmo = async (
@@ -34,6 +35,7 @@ export const SplitLedgerView: React.FC<Props> = ({
     amount: number,
     userName: string
   ) => {
+    if (userId !== currentUserId || !venmoHandle) return;
     const note = encodeURIComponent(
       `PoolCart: ${pool.title} (${userName.split(' ')[0]})`
     );
@@ -52,9 +54,7 @@ export const SplitLedgerView: React.FC<Props> = ({
       } else {
         await Linking.openURL(venmoWebFallback);
       }
-      if (pool.participants.find((p) => p.id === userId)?.paidStatus !== 'paid') {
-        onTogglePaidStatus(userId);
-      }
+
     } catch {
       Alert.alert(
         'Venmo Payment Details',
@@ -100,7 +100,7 @@ export const SplitLedgerView: React.FC<Props> = ({
         {porch && (
           <View style={styles.coolerCard}>
             <Text style={styles.coolerPhotoTag}>
-              {porch.photoLabel || '📸 Porch Drop Zone'} • Access:{' '}
+              Porch location note • Access:{' '}
               <Text style={{ fontWeight: '800' }}>
                 {porch.accessCodeOrPin || 'Open Porch'}
               </Text>
@@ -128,7 +128,7 @@ export const SplitLedgerView: React.FC<Props> = ({
 
       {breakdowns.map((b) => {
         const isMe = b.userId === currentUserId;
-        const canTogglePaid = isCurrentUserHost || isMe;
+        const canTogglePaid = isCurrentUserHost && pool.status === 'locked' && b.totalDue > 0;
         const hasTrueUpDelta = Math.abs(b.netTrueUpDelta) >= 0.01;
 
         return (
@@ -158,7 +158,7 @@ export const SplitLedgerView: React.FC<Props> = ({
                   styles.paidChip,
                   b.paidStatus === 'paid'
                     ? styles.paidChipGreen
-                    : b.paidStatus === 'stripe_authorized'
+                    : b.paidStatus === 'demo_authorized'
                     ? styles.paidChipPurple
                     : styles.paidChipAmber,
                   !canTogglePaid && { opacity: 0.5 },
@@ -171,16 +171,17 @@ export const SplitLedgerView: React.FC<Props> = ({
                     styles.paidChipText,
                     b.paidStatus === 'paid'
                       ? styles.paidTextGreen
-                      : b.paidStatus === 'stripe_authorized'
+                      : b.paidStatus === 'demo_authorized'
                       ? styles.paidTextPurple
                       : styles.paidTextAmber,
                   ]}
                 >
                   {b.paidStatus === 'paid'
-                    ? '✓ Paid'
-                    : b.paidStatus === 'stripe_authorized'
-                    ? '💳 Hold Authorized'
-                    : 'Mark Paid'}
+                    ? '✓ Payment confirmed'
+                    : b.paidStatus === 'demo_authorized'
+                    ? 'Demo hold (no funds)'
+                    : b.paidStatus === 'demo_paid' ? 'Demo captured (no funds)'
+                    : 'Confirm payment'}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -199,7 +200,7 @@ export const SplitLedgerView: React.FC<Props> = ({
                     <View key={li.itemId} style={styles.lineItemRow}>
                       <View style={styles.lineItemLeft}>
                         <Text style={styles.lineItemTitle}>
-                          {li.emoji} {li.itemName} (×{li.quantity})
+                          {li.emoji} {li.itemName} (×{li.committedQuantity} payable, {li.pendingQuantity} pending)
                         </Text>
                         {priceAdjusted && (
                           <Text style={styles.trueUpPriceSub}>
@@ -218,7 +219,7 @@ export const SplitLedgerView: React.FC<Props> = ({
                           >
                             {li.caseFilled
                               ? '✓ Case filled'
-                              : `⏳ Waiting for case to fill (${li.caseProgressText})`}
+                              : `⏳ ${li.caseProgressText}`}
                           </Text>
                         )}
                       </View>
@@ -265,39 +266,41 @@ export const SplitLedgerView: React.FC<Props> = ({
                   </Text>
                 </View>
 
+                {b.pendingCaseSubtotal > 0 && <Text style={{ color: '#6B21A8', marginTop: 8 }}>Pending shares: ${b.pendingCaseSubtotal.toFixed(2)} — excluded from payment.</Text>}
                 {/* Track #3: Dual Settlement Buttons (Stripe Pre-Auth Hold + 1-Tap Venmo) */}
-                {b.paidStatus !== 'paid' && b.totalDue > 0 && (
+                {isMe && b.paidStatus !== 'paid' && b.paidStatus !== 'demo_paid' && b.totalDue > 0 && (
                   <View style={styles.paymentButtonsWrap}>
-                    {b.paidStatus !== 'stripe_authorized' ? (
+                    {b.paidStatus !== 'demo_authorized' ? (
                       <TouchableOpacity
                         style={styles.stripeHoldButton}
                         onPress={() =>
-                          onAuthorizeStripeHold(b.userId, b.totalDue)
+                          onAuthorizeDemoHold(b.userId, b.totalDue)
                         }
                       >
                         <Text style={styles.stripeHoldButtonText}>
-                          💳 Authorize Stripe Card Hold (${b.totalDue.toFixed(2)})
+                          Simulate card hold (${b.totalDue.toFixed(2)})
                         </Text>
                         <Text style={styles.stripeHoldSubText}>
-                          $0 charged now • Captures only if pool meets ${pool.minimumOrderAmount} min
+                          Demo only • no card is connected and no funds move
                         </Text>
                       </TouchableOpacity>
                     ) : (
                       <View style={styles.stripeAuthorizedBanner}>
                         <Text style={styles.stripeAuthorizedText}>
-                          🔒 Stripe Hold Authorized (${b.totalDue.toFixed(2)}) • Ready for Host Capture
+                          Demo hold (${b.totalDue.toFixed(2)}) • no funds authorized
                         </Text>
                       </View>
                     )}
 
                     <TouchableOpacity
+                      disabled={!venmoHandle || pool.status !== 'locked'}
                       style={styles.venmoButton}
                       onPress={() =>
                         handlePayWithVenmo(b.userId, b.totalDue, b.userName)
                       }
                     >
                       <Text style={styles.venmoButtonText}>
-                        💸 Pay ${b.totalDue.toFixed(2)} to @{venmoHandle} via Venmo
+                        {!venmoHandle ? 'Host has not provided a Venmo handle' : pool.status !== 'locked' ? 'Finalize the pool before paying' : `Open Venmo for $${b.totalDue.toFixed(2)} to @${venmoHandle}`}
                       </Text>
                     </TouchableOpacity>
                   </View>

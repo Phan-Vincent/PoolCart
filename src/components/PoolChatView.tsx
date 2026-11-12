@@ -7,6 +7,7 @@ import {
   StyleSheet,
 } from 'react-native';
 import { GroupBuyPool, Participant, PoolMessage } from '../types/groupBuy';
+import { isPoolHost } from '../utils/poolActions';
 import { getCaseSplitStatus } from '../utils/calculations';
 
 interface Props {
@@ -20,6 +21,7 @@ export const PoolChatView: React.FC<Props> = ({
   activeUser,
   onSendMessage,
 }) => {
+  const host = isPoolHost(pool, activeUser.id);
   const [draft, setDraft] = useState('');
   const [postAsAnnouncement, setPostAsAnnouncement] = useState(false);
 
@@ -35,13 +37,13 @@ export const PoolChatView: React.FC<Props> = ({
 
   const handleSend = () => {
     if (!draft.trim()) return;
-    onSendMessage(draft.trim(), postAsAnnouncement);
+    onSendMessage(draft.trim(), host && postAsAnnouncement);
     setDraft('');
     setPostAsAnnouncement(false);
   };
 
   const handleQuickPrompt = (promptText: string, asAnnouncement = false) => {
-    onSendMessage(promptText, asAnnouncement);
+    onSendMessage(promptText, host && asAnnouncement);
   };
 
   return (
@@ -99,6 +101,7 @@ export const PoolChatView: React.FC<Props> = ({
 
           <TouchableOpacity
             style={[styles.quickChip, styles.quickChipHost]}
+            disabled={!host}
             onPress={() =>
               handleQuickPrompt(
                 `📦 Wholesale delivery has arrived at ${pool.pickupAddress}! Cooler is out on the porch for pickup (${pool.pickupWindow}).`,
@@ -176,6 +179,7 @@ export const PoolChatView: React.FC<Props> = ({
               postAsAnnouncement && styles.annToggleActive,
             ]}
             onPress={() => setPostAsAnnouncement(!postAsAnnouncement)}
+            disabled={!host}
           >
             <Text
               style={[
@@ -195,6 +199,7 @@ export const PoolChatView: React.FC<Props> = ({
             value={draft}
             onChangeText={setDraft}
             multiline
+            maxLength={4000}
           />
           <TouchableOpacity
             style={[

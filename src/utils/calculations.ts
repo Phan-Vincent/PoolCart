@@ -25,7 +25,7 @@ export interface WholesaleManifestLine {
 }
 
 export function getEffectiveUnitPrice(item: CatalogItem): number {
-  return typeof item.actualUnitPrice === 'number' && !isNaN(item.actualUnitPrice)
+  return typeof item.actualUnitPrice === 'number' && Number.isFinite(item.actualUnitPrice) && item.actualUnitPrice > 0
     ? item.actualUnitPrice
     : item.unitPrice;
 }
@@ -85,166 +85,127 @@ export function getCaseSplitStatus(item: CatalogItem): CaseSplitStatus {
 /**
  * Calculates pool-wide wholesale progress (respecting Receipt True-Up prices when entered)
  */
+export function money(value: number): number {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+/** Stable largest-remainder allocation. All returned amounts are exact cents. */
+export function allocateCents(total: number, weights: { id: string; weight: number }[]): Map<string, number> {
+  const eligible = weights.filter((w) => w.weight > 0);
+  const weightSum = eligible.reduce((sum, w) => sum + w.weight, 0);
+  const cents = Math.round(Math.abs(total) * 100);
+  const rows = eligible.map((w) => {
+    const exact = cents * w.weight / weightSum;
+    return { id: w.id, cents: Math.floor(exact), fraction: exact - Math.floor(exact) };
+  });
+  let remaining = cents - rows.reduce((sum, r) => sum + r.cents, 0);
+  rows.sort((a, b) => b.fraction - a.fraction || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  for (const row of rows) if (remaining-- > 0) row.cents += 1;
+  return new Map(rows.map((r) => [r.id, (total < 0 ? -1 : 1) * r.cents / 100]));
+}
+
+/** Claim-array order is the allocation order; trimming removes from its end. */
+export function getCommittedQuantity(item: CatalogItem, userId: string): number {
+  let remaining = getCaseSplitStatus(item).committedUnits;
+  for (const claim of item.claims) {
+    const quantity = Math.min(claim.quantity, Math.max(0, remaining));
+    if (claim.userId === userId) return quantity;
+    remaining -= quantity;
+  }
+  return 0;
+}
+
 export function getPoolProgressSummary(pool: GroupBuyPool) {
   let committedPoolTotal = 0;
   let pendingCaseTotal = 0;
   let quotedCombinedTotal = 0;
   let totalRetailValue = 0;
-
-  pool.items.forEach((item) => {
-    const status = getCaseSplitStatus(item);
-    const effectivePrice = getEffectiveUnitPrice(item);
-    committedPoolTotal += status.committedUnits * effectivePrice;
-    pendingCaseTotal += status.remainderUnits * effectivePrice;
-    quotedCombinedTotal += status.totalClaimedUnits * item.unitPrice;
-    totalRetailValue += status.totalClaimedUnits * item.retailPrice;
-  });
-
-  const combinedPoolTotal = committedPoolTotal + pendingCaseTotal;
-  const minimumProgressRatio = Math.min(1, combinedPoolTotal / pool.minimumOrderAmount);
-  const freeDeliveryProgressRatio = Math.min(1, combinedPoolTotal / pool.freeDeliveryThreshold);
-
-  const amountNeededForMinimum = Math.max(0, pool.minimumOrderAmount - combinedPoolTotal);
-  const amountNeededForFreeDelivery = Math.max(0, pool.freeDeliveryThreshold - combinedPoolTotal);
-
-  const isMinimumMet = combinedPoolTotal >= pool.minimumOrderAmount;
-  const isFreeDeliveryUnlocked = combinedPoolTotal >= pool.freeDeliveryThreshold;
-
-  // Count participants who have claimed at least 1 unit across any item
   const activeParticipantIds = new Set<string>();
   pool.items.forEach((item) => {
+    const status = getCaseSplitStatus(item);
+    const price = getEffectiveUnitPrice(item);
+    committedPoolTotal += money(status.committedUnits * price);
+    pendingCaseTotal += money(status.remainderUnits * price);
+    quotedCombinedTotal += money(status.committedUnits * item.unitPrice);
+    totalRetailValue += money(status.committedUnits * item.retailPrice);
     item.claims.forEach((c) => {
-      if (c.quantity > 0) activeParticipantIds.add(c.userId);
+      if (getCommittedQuantity(item, c.userId) > 0) activeParticipantIds.add(c.userId);
     });
   });
-
-  const activeBuyerCount = Math.max(1, activeParticipantIds.size);
-
-  const effectiveDeliveryFee =
-    typeof pool.trueUp?.actualDeliveryFee === 'number'
-      ? pool.trueUp.actualDeliveryFee
-      : isFreeDeliveryUnlocked
-      ? 0
-      : pool.deliveryFee;
-
-  const currentDeliveryFeePerPerson = effectiveDeliveryFee / activeBuyerCount;
-  const extraTaxOrBagFee = pool.trueUp?.taxOrBagFee || 0;
-
-  const totalPoolSavings = Math.max(
-    0,
-    totalRetailValue - (combinedPoolTotal + extraTaxOrBagFee)
-  );
-
+  committedPoolTotal = money(committedPoolTotal);
+  pendingCaseTotal = money(pendingCaseTotal);
+  quotedCombinedTotal = money(quotedCombinedTotal);
+  // Historical callers use combinedPoolTotal; it now means orderable merchandise only.
+  const combinedPoolTotal = committedPoolTotal;
+  const hasOrder = activeParticipantIds.size > 0;
+  const isMinimumMet = hasOrder && committedPoolTotal >= pool.minimumOrderAmount;
+  const isFreeDeliveryUnlocked = hasOrder && committedPoolTotal >= pool.freeDeliveryThreshold;
+  const effectiveDeliveryFee = !hasOrder ? 0 : money(pool.trueUp?.actualDeliveryFee ??
+    (isFreeDeliveryUnlocked ? 0 : pool.deliveryFee));
+  const extraTaxOrBagFee = hasOrder ? money(pool.trueUp?.taxOrBagFee ?? 0) : 0;
   return {
-    committedPoolTotal,
-    pendingCaseTotal,
-    combinedPoolTotal,
-    quotedCombinedTotal,
-    minimumProgressRatio,
-    freeDeliveryProgressRatio,
-    amountNeededForMinimum,
-    amountNeededForFreeDelivery,
-    isMinimumMet,
-    isFreeDeliveryUnlocked,
-    activeBuyerCount,
+    committedPoolTotal, pendingCaseTotal, combinedPoolTotal, quotedCombinedTotal,
+    minimumProgressRatio: pool.minimumOrderAmount > 0 ? Math.min(1, combinedPoolTotal / pool.minimumOrderAmount) : (hasOrder ? 1 : 0),
+    freeDeliveryProgressRatio: pool.freeDeliveryThreshold > 0 ? Math.min(1, combinedPoolTotal / pool.freeDeliveryThreshold) : (hasOrder ? 1 : 0),
+    amountNeededForMinimum: money(Math.max(0, pool.minimumOrderAmount - combinedPoolTotal)),
+    amountNeededForFreeDelivery: money(Math.max(0, pool.freeDeliveryThreshold - combinedPoolTotal)),
+    isMinimumMet, isFreeDeliveryUnlocked,
+    activeBuyerCount: activeParticipantIds.size,
     effectiveDeliveryFee,
-    currentDeliveryFeePerPerson,
+    currentDeliveryFeePerPerson: hasOrder ? effectiveDeliveryFee / activeParticipantIds.size : 0,
     extraTaxOrBagFee,
-    totalPoolSavings,
+    totalPoolSavings: money(totalRetailValue - committedPoolTotal - effectiveDeliveryFee - extraTaxOrBagFee),
   };
 }
 
-/**
- * Generates per-participant itemized ledger and totals for checkout & host tracking,
- * incorporating Receipt True-Up actual unit prices and pro-rata tax/bag fees.
- */
 export function getParticipantBreakdowns(pool: GroupBuyPool): UserCostBreakdown[] {
   const summary = getPoolProgressSummary(pool);
-
-  return pool.participants.map((participant) => {
+  const rows = pool.participants.map((participant) => {
+    const lineItems: UserCostBreakdown['lineItems'] = [];
     let committedSubtotal = 0;
     let pendingCaseSubtotal = 0;
     let quotedSubtotal = 0;
-    let totalEstimatedSavings = 0;
-    const lineItems: UserCostBreakdown['lineItems'] = [];
-
+    let retailSubtotal = 0;
     pool.items.forEach((item) => {
       const claim = item.claims.find((c) => c.userId === participant.id);
       if (!claim || claim.quantity <= 0) return;
-
-      const status = getCaseSplitStatus(item);
-      const effectivePrice = getEffectiveUnitPrice(item);
-      const itemSubtotal = claim.quantity * effectivePrice;
-      const itemQuotedSubtotal = claim.quantity * item.unitPrice;
-      quotedSubtotal += itemQuotedSubtotal;
-
-      const itemSavings =
-        claim.quantity * Math.max(0, item.retailPrice - effectivePrice);
-      totalEstimatedSavings += itemSavings;
-
-      const isCaseSplit = item.mode === 'case_split';
-      const caseFilled = !isCaseSplit || status.remainderUnits === 0;
-
-      if (caseFilled) {
-        committedSubtotal += itemSubtotal;
-      } else {
-        pendingCaseSubtotal += itemSubtotal;
-      }
-
+      const committedQuantity = getCommittedQuantity(item, participant.id);
+      const pendingQuantity = claim.quantity - committedQuantity;
+      const effectiveUnitPrice = getEffectiveUnitPrice(item);
+      const subtotal = money(committedQuantity * effectiveUnitPrice);
+      const pendingSubtotal = money(pendingQuantity * effectiveUnitPrice);
+      committedSubtotal += subtotal;
+      pendingCaseSubtotal += pendingSubtotal;
+      quotedSubtotal += money(committedQuantity * item.unitPrice);
+      retailSubtotal += money(committedQuantity * item.retailPrice);
       lineItems.push({
-        itemId: item.id,
-        itemName: item.name,
-        emoji: item.emoji,
-        quantity: claim.quantity,
-        quotedUnitPrice: item.unitPrice,
-        effectiveUnitPrice: effectivePrice,
-        subtotal: itemSubtotal,
-        isCaseSplit,
-        caseFilled,
-        caseProgressText: isCaseSplit
-          ? `${status.totalClaimedUnits}/${status.caseSize} case units claimed`
-          : undefined,
+        itemId: item.id, itemName: item.name, emoji: item.emoji,
+        quantity: claim.quantity, committedQuantity, pendingQuantity, pendingSubtotal,
+        quotedUnitPrice: item.unitPrice, effectiveUnitPrice, subtotal,
+        isCaseSplit: item.mode === 'case_split', caseFilled: pendingQuantity === 0,
+        caseProgressText: `${committedQuantity} committed; ${pendingQuantity} pending (not payable)`,
       });
     });
-
-    const hasItems = lineItems.length > 0;
-    const memberMerchandiseTotal = committedSubtotal + pendingCaseSubtotal;
-    const estimatedDeliveryShare = hasItems ? summary.currentDeliveryFeePerPerson : 0;
-
-    // Pro-rata share of extra receipt tax/bag/ice fees based on merchandise share
-    const proRataRatio =
-      summary.combinedPoolTotal > 0
-        ? memberMerchandiseTotal / summary.combinedPoolTotal
-        : 0;
-    const proRataTaxOrAdjustment = hasItems
-      ? summary.extraTaxOrBagFee * proRataRatio
-      : 0;
-
-    const totalDue =
-      memberMerchandiseTotal + estimatedDeliveryShare + proRataTaxOrAdjustment;
-
-    const initialQuotedDeliveryShare = hasItems
-      ? (summary.quotedCombinedTotal >= pool.freeDeliveryThreshold
-          ? 0
-          : pool.deliveryFee) / summary.activeBuyerCount
-      : 0;
-    const initialEstimateTotal = quotedSubtotal + initialQuotedDeliveryShare;
-    const netTrueUpDelta = totalDue - initialEstimateTotal;
-
+    return { participant, lineItems, committedSubtotal: money(committedSubtotal),
+      pendingCaseSubtotal: money(pendingCaseSubtotal), quotedSubtotal: money(quotedSubtotal), retailSubtotal: money(retailSubtotal) };
+  });
+  const weights = rows.map((r) => ({ id: r.participant.id, weight: r.committedSubtotal }));
+  const buyers = rows.map((r) => ({ id: r.participant.id, weight: r.lineItems.some((li) => li.committedQuantity > 0) ? 1 : 0 }));
+  const delivery = allocateCents(summary.effectiveDeliveryFee, buyers);
+  const taxes = allocateCents(summary.extraTaxOrBagFee, weights);
+  const originalDelivery = allocateCents(summary.quotedCombinedTotal >= pool.freeDeliveryThreshold ? 0 : pool.deliveryFee, buyers);
+  return rows.map((r) => {
+    const estimatedDeliveryShare = delivery.get(r.participant.id) ?? 0;
+    const proRataTaxOrAdjustment = taxes.get(r.participant.id) ?? 0;
+    const totalDue = money(r.committedSubtotal + estimatedDeliveryShare + proRataTaxOrAdjustment);
     return {
-      userId: participant.id,
-      userName: participant.name,
-      avatarColor: participant.avatarColor,
-      committedSubtotal,
-      pendingCaseSubtotal,
-      estimatedDeliveryShare,
-      proRataTaxOrAdjustment,
-      netTrueUpDelta,
-      totalEstimatedSavings,
-      totalDue,
-      paidStatus: participant.paidStatus,
-      pickedUp: participant.pickedUp,
-      lineItems,
+      userId: r.participant.id, userName: r.participant.name, avatarColor: r.participant.avatarColor,
+      committedSubtotal: r.committedSubtotal, pendingCaseSubtotal: r.pendingCaseSubtotal,
+      estimatedDeliveryShare, proRataTaxOrAdjustment, totalDue,
+      netTrueUpDelta: money(totalDue - r.quotedSubtotal - (originalDelivery.get(r.participant.id) ?? 0)),
+      totalEstimatedSavings: money(r.retailSubtotal - totalDue),
+      paidStatus: r.participant.paidStatus, demoHoldId: r.participant.demoHoldId,
+      pickedUp: r.participant.pickedUp, lineItems: r.lineItems,
     };
   });
 }
@@ -269,7 +230,7 @@ export function getWholesaleOrderManifest(pool: GroupBuyPool): {
     if (status.totalClaimedUnits === 0) return;
 
     const effectivePrice = getEffectiveUnitPrice(item);
-    const lineTotal = status.committedUnits * effectivePrice;
+    const lineTotal = money(status.committedUnits * effectivePrice);
     const orderQuantityLabel =
       item.mode === 'case_split'
         ? `${status.fullCasesCount} full case${status.fullCasesCount === 1 ? '' : 's'} (${status.committedUnits} × ${item.unitLabel})`
@@ -295,11 +256,11 @@ export function getWholesaleOrderManifest(pool: GroupBuyPool): {
     }
   });
 
-  const totalSupplierMerchandiseCost = lines.reduce((sum, l) => sum + l.lineTotal, 0);
+  const totalSupplierMerchandiseCost = money(lines.reduce((sum, l) => sum + l.lineTotal, 0));
   const supplierDeliveryFee = summary.effectiveDeliveryFee;
   const extraTaxOrBagFee = summary.extraTaxOrBagFee;
   const grandTotalSupplierInvoice =
-    totalSupplierMerchandiseCost + supplierDeliveryFee + extraTaxOrBagFee;
+    money(totalSupplierMerchandiseCost + supplierDeliveryFee + extraTaxOrBagFee);
 
   return {
     lines,
@@ -336,8 +297,9 @@ export function buildShareablePoolInviteText(pool: GroupBuyPool): string {
   return (
     `🥬 Join our neighborhood grocery group buy on PoolCart!\n` +
     `🔑 Pool Invite Code: ${pool.joinCode}\n` +
+    `Open in installed app: poolcart://join/${encodeURIComponent(pool.joinCode)}\n` +
     `Pool: ${pool.title} (${pool.supplierName})\n` +
-    `Host: ${pool.hostName} • Pickup: ${pool.pickupWindow} at ${pool.pickupAddress}\n` +
+    `Host: ${pool.hostName} • Pickup: ${pool.pickupWindow}\n` +
     `Progress: $${summary.combinedPoolTotal.toFixed(2)} / $${pool.minimumOrderAmount} minimum (${
       summary.isFreeDeliveryUnlocked
         ? 'FREE wholesale delivery unlocked!'
@@ -366,7 +328,7 @@ export function buildSupplierOrderExportText(pool: GroupBuyPool): string {
     .map(
       (b) =>
         `• ${b.userName} (${b.paidStatus === 'paid' ? 'PAID' : 'PENDING'}): $${b.totalDue.toFixed(2)} — ` +
-        b.lineItems.map((li) => `${li.emoji}×${li.quantity}`).join(', ')
+        b.lineItems.filter((li) => li.committedQuantity > 0).map((li) => `${li.emoji}×${li.committedQuantity}`).join(', ')
     )
     .join('\n');
 

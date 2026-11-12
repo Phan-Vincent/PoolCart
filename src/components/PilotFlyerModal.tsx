@@ -7,6 +7,7 @@ import {
   StyleSheet,
   ScrollView,
   Share,
+  Linking,
 } from 'react-native';
 import { GroupBuyPool } from '../types/groupBuy';
 import {
@@ -21,50 +22,6 @@ interface Props {
   onClose: () => void;
 }
 
-/**
- * Generates a deterministic 9x9 QR-style visual matrix from the pool's joinCode
- * so the poster looks like a scannable flyer card with zero external SVG dependencies.
- */
-function buildQrMatrix(seed: string): boolean[][] {
-  const size = 9;
-  const grid: boolean[][] = Array.from({ length: size }, () =>
-    Array(size).fill(false)
-  );
-
-  // Corner finder patterns (top-left, top-right, bottom-left 3x3 blocks)
-  const drawFinder = (r0: number, c0: number) => {
-    for (let r = 0; r < 3; r++) {
-      for (let c = 0; c < 3; c++) {
-        grid[r0 + r][c0 + c] = !(r === 1 && c === 1);
-      }
-    }
-  };
-  drawFinder(0, 0);
-  drawFinder(0, size - 3);
-  drawFinder(size - 3, 0);
-
-  // Fill interior cells deterministically from joinCode characters
-  let hash = 2166136261;
-  for (let i = 0; i < seed.length; i++) {
-    hash ^= seed.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-
-  for (let r = 0; r < size; r++) {
-    for (let c = 0; c < size; c++) {
-      const inFinder =
-        (r < 3 && c < 3) ||
-        (r < 3 && c >= size - 3) ||
-        (r >= size - 3 && c < 3);
-      if (!inFinder) {
-        const bit = (Math.abs(hash + r * 31 + c * 17) % 3) !== 0;
-        grid[r][c] = bit;
-      }
-    }
-  }
-  return grid;
-}
-
 export const PilotFlyerModal: React.FC<Props> = ({
   visible,
   pool,
@@ -73,7 +30,7 @@ export const PilotFlyerModal: React.FC<Props> = ({
 }) => {
   const [tab, setTab] = useState<'flyer' | 'onboarding'>(initialView);
   const summary = getPoolProgressSummary(pool);
-  const qrMatrix = buildQrMatrix(pool.joinCode);
+
 
   const handleSharePoster = async () => {
     try {
@@ -105,7 +62,7 @@ export const PilotFlyerModal: React.FC<Props> = ({
                   tab === 'flyer' && styles.switchTextActive,
                 ]}
               >
-                🖨️ QR Lobby Flyer
+                Invite Flyer
               </Text>
             </TouchableOpacity>
 
@@ -141,29 +98,17 @@ export const PilotFlyerModal: React.FC<Props> = ({
                 {/* QR Matrix Visual & Code Box */}
                 <View style={styles.qrRow}>
                   <View style={styles.qrBox}>
-                    {qrMatrix.map((row, rIdx) => (
-                      <View key={rIdx} style={styles.qrLine}>
-                        {row.map((cell, cIdx) => (
-                          <View
-                            key={cIdx}
-                            style={[
-                              styles.qrCell,
-                              cell ? styles.qrCellDark : styles.qrCellLight,
-                            ]}
-                          />
-                        ))}
-                      </View>
-                    ))}
+                    <Text style={{ color: '#0F172A', fontWeight: '800', textAlign: 'center' }}>{'TYPE\nINVITE\nCODE'}</Text>
                   </View>
 
                   <View style={styles.codeInfoCol}>
                     <Text style={styles.joinCodeLabel}>POOL INVITE CODE</Text>
                     <Text style={styles.joinCodeBig}>{pool.joinCode}</Text>
-                    <Text style={styles.deepLinkText}>
-                      poolcart://join/{pool.joinCode}
-                    </Text>
+                    <TouchableOpacity onPress={() => Linking.openURL(`poolcart://join/${encodeURIComponent(pool.joinCode)}`).catch(() => undefined)}>
+                      <Text style={styles.deepLinkText}>poolcart://join/{pool.joinCode}</Text>
+                    </TouchableOpacity>
                     <Text style={styles.webLinkText}>
-                      poolcart.vercel.app/?pool={pool.joinCode}
+                      Manual invite code • QR encoding is not connected
                     </Text>
                   </View>
                 </View>
@@ -198,14 +143,14 @@ export const PilotFlyerModal: React.FC<Props> = ({
                   onPress={handleSharePoster}
                 >
                   <Text style={styles.sharePosterBtnText}>
-                    📤 Share / Print Lobby Flyer & Link
+                    Share invite text & app link
                   </Text>
                 </TouchableOpacity>
               </View>
             ) : (
               <View style={styles.onboardingBox}>
                 <Text style={styles.onboardMainTitle}>
-                  Save 30–40% on Groceries Together
+                  Combine Grocery Orders with Neighbors
                 </Text>
                 <Text style={styles.onboardSub}>
                   PoolCart lets neighbors combine grocery orders to unlock
@@ -216,7 +161,7 @@ export const PilotFlyerModal: React.FC<Props> = ({
                 <View style={styles.stepCard}>
                   <Text style={styles.stepNum}>1️⃣ Pool Toward the Minimum</Text>
                   <Text style={styles.stepBody}>
-                    Every item you add counts toward the neighborhood supplier
+                    Direct items and completed cases count toward the neighborhood supplier
                     minimum (e.g., $250) and waives the wholesale delivery fee
                     once the pool crosses the free delivery tier ($300+).
                   </Text>
@@ -236,12 +181,10 @@ export const PilotFlyerModal: React.FC<Props> = ({
 
                 <View style={styles.stepCard}>
                   <Text style={styles.stepNum}>
-                    3️⃣ Zero-Risk Pre-Auth Hold or Venmo
+                    3️⃣ Demo Holds or Manual Settlement
                   </Text>
                   <Text style={styles.stepBody}>
-                    Authorize a Stripe payment hold ($0 charged unless the pool
-                    meets its wholesale minimum at cutoff) or settle in 1 tap via
-                    Venmo after the host reconciles the final wholesale receipt.
+                    Card holds and capture are local simulations with no funds moved. After receipt reconciliation, you may open Venmo separately; the host must verify payment before recording it.
                   </Text>
                 </View>
 

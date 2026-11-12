@@ -17,6 +17,7 @@ import {
   Participant,
   SupplierCatalogTemplate,
 } from '../types/groupBuy';
+import { newId, requireNumber, validatePool } from '../utils/poolActions';
 import { SUPPLIER_TEMPLATES } from '../data/mockPools';
 
 interface AddItemModalProps {
@@ -32,6 +33,7 @@ export const AddItemModal: React.FC<AddItemModalProps> = ({
   onClose,
   onAddItem,
 }) => {
+  const [formError, setFormError] = useState('');
   const [name, setName] = useState('');
   const [emoji, setEmoji] = useState('📦');
   const [unitLabel, setUnitLabel] = useState('1 unit');
@@ -43,13 +45,16 @@ export const AddItemModal: React.FC<AddItemModalProps> = ({
 
   const handleSave = () => {
     if (!name.trim()) return;
-    const parsedUnit = parseFloat(unitPrice) || 5;
-    const parsedRetail = parseFloat(retailPrice) || parsedUnit * 1.35;
-    const parsedCase = parseInt(caseSize, 10) || 4;
-    const parsedMaxCases = parseInt(maxCases, 10);
+    let parsedUnit: number, parsedRetail: number, parsedCase: number, parsedMaxCases: number;
+    try {
+      parsedUnit = requireNumber(Number(unitPrice), 'Wholesale unit price', 0.01);
+      parsedRetail = requireNumber(Number(retailPrice), 'Retail unit price', 0.01);
+      parsedCase = mode === 'case_split' ? requireNumber(Number(caseSize), 'Shares per case', 2, true, 1000) : 1;
+      parsedMaxCases = maxCases.trim() ? requireNumber(Number(maxCases), 'Maximum cases', 1, true, 1000) : NaN;
+    } catch (error) { setFormError(String(error)); return; }
 
     const item: CatalogItem = {
-      id: `item_${Date.now()}`,
+      id: newId('item'),
       name: name.trim(),
       category: 'Neighborhood Addition',
       emoji: emoji.trim() || '🛒',
@@ -200,6 +205,7 @@ export const AddItemModal: React.FC<AddItemModalProps> = ({
             )}
           </ScrollView>
 
+          {!!formError && <Text style={{ color: '#B91C1C', paddingVertical: 6 }}>{formError}</Text>}
           <View style={styles.actionsRow}>
             <TouchableOpacity style={styles.cancelBtn} onPress={onClose}>
               <Text style={styles.cancelBtnText}>Cancel</Text>
@@ -215,38 +221,180 @@ export const AddItemModal: React.FC<AddItemModalProps> = ({
 };
 
 interface CreatePoolModalProps {
+  sourcePool?: GroupBuyPool;
   visible: boolean;
   activeUser: Participant;
   onClose: () => void;
   onCreatePool: (pool: GroupBuyPool) => void;
 }
 
+export function buildCreatedPoolFromForm(params: {
+  sourcePool?: GroupBuyPool;
+  selectedTemplate: SupplierCatalogTemplate;
+  activeUser: Participant;
+  title: string;
+  supplierName: string;
+  minimumOrder: string;
+  freeThreshold: string;
+  venmoHandle: string;
+  pickupAddress: string;
+  pickupWindow: string;
+  cutoffTime: string;
+}): GroupBuyPool {
+  const {
+    sourcePool,
+    selectedTemplate: tpl,
+    activeUser,
+    title,
+    supplierName,
+    minimumOrder,
+    freeThreshold,
+    venmoHandle,
+    pickupAddress,
+    pickupWindow,
+    cutoffTime,
+  } = params;
+
+  if (!title.trim()) {
+    throw new Error('Pool title is required.');
+  }
+  const minAmt = requireNumber(Number(minimumOrder), 'Minimum order', 0.01);
+  const freeAmt = requireNumber(
+    Number(freeThreshold),
+    'Free-delivery threshold',
+    minAmt
+  );
+  if (!pickupAddress.trim() || !pickupWindow.trim() || !cutoffTime.trim()) {
+    throw new Error(
+      'Enter a pickup address, a new pickup date/window, and an order cutoff including timezone.'
+    );
+  }
+
+  const prefix = title
+    .replace(/[^a-zA-Z]/g, '')
+    .slice(0, 4)
+    .toUpperCase();
+  const num = newId('invite').split('_').slice(1).join('').toUpperCase();
+  const joinCode = `${prefix || 'POOL'}-${num}`;
+  const poolId = newId('pool');
+
+  // A new run or rerun must start with NO claims unless a user explicitly claims shares afterward.
+  // Preserve catalog configuration (name, category, emoji, mode, unitLabel, unitPrice, retailPrice, caseSize, maxCases),
+  // while clearing actualUnitPrice and all prior claims.
+  const templateItems: CatalogItem[] = (sourcePool?.items || tpl.items).map(
+    (raw) => ({
+      name: raw.name,
+      category: raw.category,
+      emoji: raw.emoji,
+      mode: raw.mode,
+      unitLabel: raw.unitLabel,
+      unitPrice: raw.unitPrice,
+      retailPrice: raw.retailPrice,
+      caseSize: raw.mode === 'case_split' ? raw.caseSize : undefined,
+      maxCases: raw.mode === 'case_split' ? raw.maxCases : undefined,
+      id: newId('item'),
+      actualUnitPrice: undefined,
+      claims: [],
+    })
+  );
+
+  const newPool: GroupBuyPool = {
+    id: poolId,
+    joinCode,
+    title: title.trim(),
+    supplierName: supplierName.trim() || tpl.supplierName,
+    supplierBadge: sourcePool?.supplierBadge || tpl.supplierBadge,
+    category: sourcePool?.category || tpl.category,
+    hostUserId: activeUser.id,
+    hostName: activeUser.name,
+    hostVenmoHandle: venmoHandle.trim().replace(/^@/, '') || undefined,
+    neighborhood: activeUser.neighborhood,
+    distanceMiles: sourcePool?.distanceMiles,
+    pickupAddress: pickupAddress.trim(),
+    pickupWindow: pickupWindow.trim(),
+    cutoffTime: cutoffTime.trim(),
+    minimumOrderAmount: minAmt,
+    deliveryFee: sourcePool?.deliveryFee ?? tpl.defaultDeliveryFee,
+    freeDeliveryThreshold: freeAmt,
+    status: 'open',
+    trueUp: undefined,
+    porchCheckIn: undefined,
+    wishlist: [],
+    participants: [
+      {
+        id: activeUser.id,
+        name: activeUser.name,
+        email: activeUser.email,
+        neighborhood: activeUser.neighborhood,
+        avatarColor: activeUser.avatarColor,
+        isHost: true,
+        verifiedAuth: Boolean(activeUser.verifiedAuth),
+        paidStatus: 'pending',
+        demoHoldId: undefined,
+        demoAuthorizedAmount: undefined,
+        settledAmount: undefined,
+        pickedUp: false,
+      },
+    ],
+    items: templateItems,
+    messages: [
+      {
+        id: newId('msg'),
+        poolId,
+        userId: activeUser.id,
+        userName: activeUser.name,
+        avatarColor: activeUser.avatarColor,
+        isHost: true,
+        isAnnouncement: true,
+        text: `Welcome to ${title.trim()}! Share code ${joinCode} with neighbors so we can hit the $${minAmt} wholesale minimum together.`,
+        createdAt: 'Just now',
+      },
+    ],
+  };
+
+  validatePool(newPool);
+  return newPool;
+}
+
 export const CreatePoolModal: React.FC<CreatePoolModalProps> = ({
+  sourcePool,
   visible,
   activeUser,
   onClose,
   onCreatePool,
 }) => {
+  const [formError, setFormError] = useState('');
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>(
     SUPPLIER_TEMPLATES[0].id
   );
-  const [title, setTitle] = useState(SUPPLIER_TEMPLATES[0].name);
+  const [title, setTitle] = useState(
+    sourcePool
+      ? `${sourcePool.title.replace(/ \(Next Run\)$/, '')} (Next Run)`
+      : SUPPLIER_TEMPLATES[0].name
+  );
   const [supplierName, setSupplierName] = useState(
-    SUPPLIER_TEMPLATES[0].supplierName
+    sourcePool?.supplierName || SUPPLIER_TEMPLATES[0].supplierName
   );
   const [minimumOrder, setMinimumOrder] = useState(
-    String(SUPPLIER_TEMPLATES[0].defaultMinimumOrder)
+    String(
+      sourcePool?.minimumOrderAmount ??
+        SUPPLIER_TEMPLATES[0].defaultMinimumOrder
+    )
   );
   const [freeThreshold, setFreeThreshold] = useState(
-    String(SUPPLIER_TEMPLATES[0].defaultFreeThreshold)
+    String(
+      sourcePool?.freeDeliveryThreshold ??
+        SUPPLIER_TEMPLATES[0].defaultFreeThreshold
+    )
   );
-  const [venmoHandle, setVenmoHandle] = useState('Vincent-Phan-Coop');
+  const [venmoHandle, setVenmoHandle] = useState(
+    sourcePool?.hostVenmoHandle || ''
+  );
   const [pickupAddress, setPickupAddress] = useState(
-    'Victoria Gardens Drop Point'
+    sourcePool?.pickupAddress || ''
   );
-  const [pickupWindow, setPickupWindow] = useState(
-    'Sat • 10:00 AM – 1:00 PM'
-  );
+  const [pickupWindow, setPickupWindow] = useState('');
+  const [cutoffTime, setCutoffTime] = useState('');
 
   const handleSelectTemplate = (tpl: SupplierCatalogTemplate) => {
     setSelectedTemplateId(tpl.id);
@@ -256,84 +404,30 @@ export const CreatePoolModal: React.FC<CreatePoolModalProps> = ({
     setFreeThreshold(String(tpl.defaultFreeThreshold));
   };
 
-  const generateJoinCode = (poolTitle: string) => {
-    const prefix = poolTitle
-      .replace(/[^a-zA-Z]/g, '')
-      .slice(0, 4)
-      .toUpperCase();
-    const num = Math.floor(10 + Math.random() * 89);
-    return `${prefix || 'POOL'}-${num}`;
-  };
-
   const handleCreate = () => {
-    if (!title.trim()) return;
-    const minAmt = parseFloat(minimumOrder) || 200;
-    const freeAmt = parseFloat(freeThreshold) || minAmt + 100;
     const tpl =
       SUPPLIER_TEMPLATES.find((t) => t.id === selectedTemplateId) ||
       SUPPLIER_TEMPLATES[0];
-
-    const nowTs = Date.now();
-    const joinCode = generateJoinCode(title);
-
-    const templateItems: CatalogItem[] = tpl.items.map((raw, idx) => ({
-      ...raw,
-      id: `item_${nowTs}_${idx}`,
-      claims:
-        idx === 0
-          ? [
-              {
-                userId: activeUser.id,
-                userName: activeUser.name,
-                avatarColor: activeUser.avatarColor,
-                quantity: 1,
-              },
-            ]
-          : [],
-    }));
-
-    const newPool: GroupBuyPool = {
-      id: `pool_${nowTs}`,
-      joinCode,
-      title: title.trim(),
-      supplierName: supplierName.trim() || tpl.supplierName,
-      supplierBadge: tpl.supplierBadge,
-      category: tpl.category,
-      hostName: activeUser.name,
-      hostVenmoHandle: venmoHandle.trim() || 'PoolCart-Host',
-      neighborhood: activeUser.neighborhood,
-      pickupAddress,
-      pickupWindow,
-      cutoffTime: 'Fri at 8:00 PM',
-      minimumOrderAmount: minAmt,
-      deliveryFee: tpl.defaultDeliveryFee,
-      freeDeliveryThreshold: freeAmt,
-      status: 'open',
-      participants: [
-        {
-          ...activeUser,
-          isHost: true,
-          paidStatus: 'paid',
-        },
-      ],
-      items: templateItems,
-      messages: [
-        {
-          id: `msg_${nowTs}`,
-          poolId: `pool_${nowTs}`,
-          userId: activeUser.id,
-          userName: activeUser.name,
-          avatarColor: activeUser.avatarColor,
-          isHost: true,
-          isAnnouncement: true,
-          text: `Welcome to ${title.trim()}! Share code ${joinCode} with neighbors so we can hit the $${minAmt} wholesale minimum together.`,
-          createdAt: 'Just now',
-        },
-      ],
-    };
-
-    onCreatePool(newPool);
-    onClose();
+    try {
+      const newPool = buildCreatedPoolFromForm({
+        sourcePool,
+        selectedTemplate: tpl,
+        activeUser,
+        title,
+        supplierName,
+        minimumOrder,
+        freeThreshold,
+        venmoHandle,
+        pickupAddress,
+        pickupWindow,
+        cutoffTime,
+      });
+      setFormError('');
+      onCreatePool(newPool);
+      onClose();
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : String(error));
+    }
   };
 
   return (
@@ -345,7 +439,9 @@ export const CreatePoolModal: React.FC<CreatePoolModalProps> = ({
         <View style={styles.sheet}>
           <Text style={styles.title}>Host a Neighborhood Group Buy</Text>
           <Text style={styles.subtitle}>
-            Pick a pre-loaded wholesale supplier catalog template or customize your own.
+            {sourcePool
+              ? 'Rerun this catalog with a fresh schedule. Prior claims, receipts, payments, wishlist pledges and porch details will not carry over.'
+              : 'Pick a sample supplier catalog and customize your pickup schedule.'}
           </Text>
 
           <ScrollView style={styles.formScroll}>
@@ -353,9 +449,9 @@ export const CreatePoolModal: React.FC<CreatePoolModalProps> = ({
               ⚡ 1-Tap Wholesale Supplier Catalog Template
             </Text>
             <ScrollView
+              style={sourcePool ? { display: 'none' } : styles.tplScroll}
               horizontal
               showsHorizontalScrollIndicator={false}
-              style={styles.tplScroll}
             >
               {SUPPLIER_TEMPLATES.map((tpl) => {
                 const isSelected = tpl.id === selectedTemplateId;
@@ -441,26 +537,40 @@ export const CreatePoolModal: React.FC<CreatePoolModalProps> = ({
               onChangeText={setPickupAddress}
             />
 
-            <Text style={styles.label}>Pickup Window</Text>
+            <Text style={styles.label}>Order Cutoff (date, time, timezone)</Text>
+            <TextInput
+              style={styles.input}
+              value={cutoffTime}
+              onChangeText={setCutoffTime}
+              placeholder="e.g. Nov 20, 2026 at 8 PM Pacific"
+            />
+            <Text style={styles.label}>Pickup Window (new date and timezone)</Text>
             <TextInput
               style={styles.input}
               value={pickupWindow}
               onChangeText={setPickupWindow}
+              placeholder="e.g. Sat, Nov 21 • 9:00 AM – 12:00 PM Pacific"
             />
           </ScrollView>
 
+          {!!formError && (
+            <Text style={{ color: '#B91C1C', paddingVertical: 6 }}>
+              {formError}
+            </Text>
+          )}
           <View style={styles.actionsRow}>
             <TouchableOpacity style={styles.cancelBtn} onPress={onClose}>
               <Text style={styles.cancelBtnText}>Cancel</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.saveBtn} onPress={handleCreate}>
               <Text style={styles.saveBtnText}>
-                Launch Pool ({
+                Launch Pool (
+                {sourcePool?.items.length ??
                   (
-                    SUPPLIER_TEMPLATES.find((t) => t.id === selectedTemplateId) ||
-                    SUPPLIER_TEMPLATES[0]
-                  ).items.length
-                }{' '}
+                    SUPPLIER_TEMPLATES.find(
+                      (t) => t.id === selectedTemplateId
+                    ) || SUPPLIER_TEMPLATES[0]
+                  ).items.length}{' '}
                 Items)
               </Text>
             </TouchableOpacity>
@@ -474,30 +584,60 @@ export const CreatePoolModal: React.FC<CreatePoolModalProps> = ({
 interface JoinByCodeModalProps {
   visible: boolean;
   pools: GroupBuyPool[];
+  isCloudMode?: boolean;
   onClose: () => void;
   onSelectPoolId: (poolId: string) => void;
+  onJoinByInviteCode?: (code: string) => Promise<{ poolId?: string; error?: string }>;
 }
 
 export const JoinByCodeModal: React.FC<JoinByCodeModalProps> = ({
   visible,
   pools,
+  isCloudMode = false,
   onClose,
   onSelectPoolId,
+  onJoinByInviteCode,
 }) => {
   const [codeInput, setCodeInput] = useState('');
   const [errorText, setErrorText] = useState('');
+  const [isJoining, setIsJoining] = useState(false);
 
-  const handleJoin = () => {
+  const handleJoin = async () => {
     const cleaned = codeInput.trim().toUpperCase();
     if (!cleaned) return;
 
+    if (isCloudMode && onJoinByInviteCode) {
+      setIsJoining(true);
+      try {
+        const res = await onJoinByInviteCode(cleaned);
+        if (res.error) {
+          setErrorText(res.error);
+          return;
+        }
+        if (res.poolId) {
+          setErrorText('');
+          setCodeInput('');
+          onSelectPoolId(res.poolId);
+          onClose();
+          return;
+        }
+      } finally {
+        setIsJoining(false);
+      }
+    }
+
     const matched = pools.find(
-      (p) => p.joinCode.toUpperCase() === cleaned || p.id.toUpperCase() === cleaned
+      (p) =>
+        p.joinCode.toUpperCase() === cleaned || p.id.toUpperCase() === cleaned
     );
 
     if (!matched) {
       setErrorText(
-        `No neighborhood pool found with code "${cleaned}". Try one of the active codes below!`
+        `No neighborhood pool found with code "${cleaned}". ${
+          isCloudMode
+            ? 'Check the code with your host or verify your cloud connection.'
+            : 'Try one of the active codes below!'
+        }`
       );
       return;
     }
@@ -517,7 +657,9 @@ export const JoinByCodeModal: React.FC<JoinByCodeModalProps> = ({
         <View style={styles.sheet}>
           <Text style={styles.title}>🔑 Join a Pool by Invite Code</Text>
           <Text style={styles.subtitle}>
-            Enter the 6-character code shared by your neighborhood host (or tap an active pool code below).
+            {isCloudMode
+              ? 'Enter your neighborhood invite code to join as an authenticated cloud member.'
+              : 'Enter the invite code shared by your neighborhood host (or tap an active pool code below).'}
           </Text>
 
           <TextInput
@@ -534,31 +676,45 @@ export const JoinByCodeModal: React.FC<JoinByCodeModalProps> = ({
 
           {errorText ? <Text style={styles.errorMsg}>{errorText}</Text> : null}
 
-          <Text style={styles.label}>Active Neighborhood Codes Near You</Text>
-          <View style={styles.activeCodesWrap}>
-            {pools.map((p) => (
-              <TouchableOpacity
-                key={p.id}
-                style={styles.activeCodeChip}
-                onPress={() => {
-                  onSelectPoolId(p.id);
-                  onClose();
-                }}
-              >
-                <Text style={styles.activeCodeBadge}>{p.joinCode}</Text>
-                <Text style={styles.activeCodeTitle} numberOfLines={1}>
-                  {p.title}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+          {pools.length > 0 && (
+            <>
+              <Text style={styles.label}>
+                {isCloudMode
+                  ? 'Your Joined Cloud Pools'
+                  : 'Active Neighborhood Codes Near You'}
+              </Text>
+              <View style={styles.activeCodesWrap}>
+                {pools.map((p) => (
+                  <TouchableOpacity
+                    key={p.id}
+                    style={styles.activeCodeChip}
+                    onPress={() => {
+                      onSelectPoolId(p.id);
+                      onClose();
+                    }}
+                  >
+                    <Text style={styles.activeCodeBadge}>{p.joinCode}</Text>
+                    <Text style={styles.activeCodeTitle} numberOfLines={1}>
+                      {p.title}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </>
+          )}
 
           <View style={[styles.actionsRow, { marginTop: 16 }]}>
             <TouchableOpacity style={styles.cancelBtn} onPress={onClose}>
               <Text style={styles.cancelBtnText}>Close</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.saveBtn} onPress={handleJoin}>
-              <Text style={styles.saveBtnText}>Join Pool</Text>
+            <TouchableOpacity
+              style={styles.saveBtn}
+              onPress={handleJoin}
+              disabled={isJoining}
+            >
+              <Text style={styles.saveBtnText}>
+                {isJoining ? 'Joining…' : 'Join Pool'}
+              </Text>
             </TouchableOpacity>
           </View>
         </View>

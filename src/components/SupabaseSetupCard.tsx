@@ -7,23 +7,34 @@ import {
   StyleSheet,
   ActivityIndicator,
 } from 'react-native';
+import { newId } from '../utils/poolActions';
 import { Participant } from '../types/groupBuy';
 import {
   DEMO_PROFILES,
   PoolRepository,
   SupabaseConfig,
+  SyncStatusInfo,
 } from '../services/repository';
 
 interface Props {
   activeUser: Participant;
   onSelectUser: (user: Participant) => void;
-  syncStatus: {
-    mode: 'local' | 'supabase_live' | 'supabase_error';
-    lastSyncedAt: string | null;
-    errorMessage?: string;
-    lastRealtimeEvent?: string | null;
-  };
+  syncStatus: SyncStatusInfo;
   onConfigSaved: (config: SupabaseConfig) => Promise<void>;
+  onCloudSignIn?: (
+    email: string,
+    password: string,
+    displayName: string,
+    neighborhood: string
+  ) => Promise<void>;
+  onCloudSignUp?: (
+    email: string,
+    password: string,
+    displayName: string,
+    neighborhood: string
+  ) => Promise<void>;
+  onCloudSignOut?: () => Promise<void>;
+  onFlushPendingEdits?: () => Promise<void>;
   onSimulateNeighborAction: () => void;
   onResetDemo: () => void;
 }
@@ -33,15 +44,28 @@ export const SupabaseSetupCard: React.FC<Props> = ({
   onSelectUser,
   syncStatus,
   onConfigSaved,
+  onCloudSignIn,
+  onCloudSignUp,
+  onCloudSignOut,
+  onFlushPendingEdits,
   onSimulateNeighborAction,
   onResetDemo,
 }) => {
   const existingConfig = PoolRepository.getCurrentConfig();
   const [url, setUrl] = useState(existingConfig.url);
   const [anonKey, setAnonKey] = useState(existingConfig.anonKey);
+  const [confirmReset, setConfirmReset] = useState(false);
   const [customName, setCustomName] = useState('');
   const [customNeighborhood, setCustomNeighborhood] = useState('Victoria Gardens');
   const [isConnecting, setIsConnecting] = useState(false);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authDisplayName, setAuthDisplayName] = useState('');
+  const [authNeighborhood, setAuthNeighborhood] = useState('Victoria Gardens');
+  const [authFormError, setAuthFormError] = useState('');
+
+  const isCloudEnabled =
+    existingConfig.enabled || syncStatus.mode !== 'local';
 
   useEffect(() => {
     const cfg = PoolRepository.getCurrentConfig();
@@ -77,19 +101,68 @@ export const SupabaseSetupCard: React.FC<Props> = ({
   };
 
   const handleCreateCustomProfile = () => {
+    if (isCloudEnabled) return;
     if (!customName.trim()) return;
     const colors = ['#0D9488', '#E11D48', '#2563EB', '#7C3AED', '#D97706', '#059669'];
     const randomColor = colors[Math.floor(Math.random() * colors.length)];
     const newProfile: Participant = {
-      id: `u_${customName.trim().toLowerCase().replace(/[^a-z0-9]/g, '_')}_${Date.now().toString().slice(-3)}`,
+      id: newId('u'),
       name: customName.trim(),
       neighborhood: customNeighborhood.trim() || 'Rancho Cucamonga',
       avatarColor: randomColor,
       paidStatus: 'pending',
+      verifiedAuth: false,
     };
     onSelectUser(newProfile);
     setCustomName('');
   };
+
+  const handleSignIn = async () => {
+    if (!onCloudSignIn) return;
+    setAuthFormError('');
+    setIsConnecting(true);
+    try {
+      await onCloudSignIn(
+        authEmail,
+        authPassword,
+        authDisplayName,
+        authNeighborhood
+      );
+      setAuthPassword('');
+    } catch (err: any) {
+      setAuthFormError(err?.message || String(err));
+    } finally {
+      setIsConnecting(false);
+    }
+  };
+
+  const handleSignUp = async () => {
+    if (!onCloudSignUp) return;
+    setAuthFormError('');
+    setIsConnecting(true);
+    try {
+      await onCloudSignUp(
+        authEmail,
+        authPassword,
+        authDisplayName,
+        authNeighborhood
+      );
+      setAuthPassword('');
+    } catch (err: any) {
+      setAuthFormError(err?.message || String(err));
+    } finally {
+      setIsConnecting(false);
+    }
+  };
+
+  const isErrorMode =
+    syncStatus.mode === 'supabase_error' ||
+    syncStatus.mode === 'supabase_auth_rejected' ||
+    syncStatus.mode === 'supabase_offline';
+
+  const isLiveOrEmptyMode =
+    syncStatus.mode === 'supabase_live' ||
+    syncStatus.mode === 'supabase_empty';
 
   return (
     <View style={styles.container}>
@@ -97,9 +170,9 @@ export const SupabaseSetupCard: React.FC<Props> = ({
       <View
         style={[
           styles.statusBanner,
-          syncStatus.mode === 'supabase_live'
+          isLiveOrEmptyMode
             ? styles.bannerLive
-            : syncStatus.mode === 'supabase_error'
+            : isErrorMode
             ? styles.bannerError
             : styles.bannerLocal,
         ]}
@@ -108,29 +181,39 @@ export const SupabaseSetupCard: React.FC<Props> = ({
           <View
             style={[
               styles.statusDot,
-              syncStatus.mode === 'supabase_live'
+              isLiveOrEmptyMode
                 ? styles.dotLive
-                : syncStatus.mode === 'supabase_error'
+                : isErrorMode
                 ? styles.dotError
                 : styles.dotLocal,
             ]}
           />
-          <Text style={styles.statusTitle}>
-            {syncStatus.mode === 'supabase_live'
-              ? 'Supabase Realtime Connected (Live Multi-Neighbor Sync)'
-              : syncStatus.mode === 'supabase_error'
-              ? 'Supabase Connection Error (Using Local Fallback)'
-              : 'Local Device Mode (Ready for Supabase Cloud Sync)'}
-          </Text>
+          <Text style={styles.statusTitle}>{syncStatus.label}</Text>
         </View>
 
         {syncStatus.lastSyncedAt && (
           <Text style={styles.statusMeta}>
-            Last synced: {syncStatus.lastSyncedAt}
+            Last checked: {syncStatus.lastSyncedAt}
             {syncStatus.lastRealtimeEvent
               ? ` • Live event: ${syncStatus.lastRealtimeEvent}`
               : ''}
           </Text>
+        )}
+
+        {(syncStatus.pendingLocalEditsCount ?? 0) > 0 && (
+          <View style={styles.pendingBox}>
+            <Text style={styles.pendingText}>
+              ⚠️ {syncStatus.pendingLocalEditsCount} unsaved local edit(s) preserved on device. Cloud did not accept or receive them yet.
+            </Text>
+            {onFlushPendingEdits && (
+              <TouchableOpacity
+                style={styles.retryPendingBtn}
+                onPress={onFlushPendingEdits}
+              >
+                <Text style={styles.retryPendingText}>Retry Pending Cloud Edits</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         )}
 
         {syncStatus.errorMessage && (
@@ -138,27 +221,30 @@ export const SupabaseSetupCard: React.FC<Props> = ({
         )}
       </View>
 
-      {/* Multi-Neighbor Identity Switcher */}
+      {/* Multi-Neighbor Identity Switcher (Strict Local Demo Only) */}
       <View style={styles.card}>
         <Text style={styles.cardTitle}>
-          👤 Active Neighbor Identity (Test Multi-User Claims)
+          👤 Local Demo Neighbor Identity (Local Mode Only)
         </Text>
         <Text style={styles.cardSub}>
-          Switch between neighbor profiles on this device—or open the app on two
-          phones—to test how claims combine toward wholesale minimums and case splits.
+          {isCloudEnabled
+            ? 'Demo profile switching is disabled while cloud mode is enabled. Cloud identity is derived strictly from your authenticated Supabase session.'
+            : 'Switch demo profiles on this device to test claims in local demo mode. Demo profiles are not authenticated users and are never sent to shared cloud pools.'}
         </Text>
 
         <View style={styles.profileGrid}>
           {DEMO_PROFILES.map((prof) => {
-            const isSelected = prof.id === activeUser.id;
+            const isSelected = !isCloudEnabled && prof.id === activeUser.id;
             return (
               <TouchableOpacity
                 key={prof.id}
                 style={[
                   styles.profilePill,
                   isSelected && styles.profilePillActive,
+                  isCloudEnabled && { opacity: 0.45 },
                 ]}
-                onPress={() => onSelectUser(prof)}
+                onPress={() => !isCloudEnabled && onSelectUser(prof)}
+                disabled={isCloudEnabled}
               >
                 <View
                   style={[
@@ -185,55 +271,54 @@ export const SupabaseSetupCard: React.FC<Props> = ({
           })}
         </View>
 
-        {/* Custom Profile Creator */}
-        <View style={styles.customProfileBox}>
-          <Text style={styles.inputLabel}>Or Join as a New Neighbor Profile</Text>
-          <View style={styles.customRow}>
-            <TextInput
-              style={[styles.input, { flex: 1, marginRight: 8 }]}
-              placeholder="Your Name (e.g. Sarah J.)"
-              value={customName}
-              onChangeText={setCustomName}
-            />
-            <TextInput
-              style={[styles.input, { flex: 1, marginRight: 8 }]}
-              placeholder="Neighborhood"
-              value={customNeighborhood}
-              onChangeText={setCustomNeighborhood}
-            />
-            <TouchableOpacity
-              style={styles.createProfileBtn}
-              onPress={handleCreateCustomProfile}
-            >
-              <Text style={styles.createProfileBtnText}>Use</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
+        {!isCloudEnabled && (
+          <>
+            {/* Custom Profile Creator */}
+            <View style={styles.customProfileBox}>
+              <Text style={styles.inputLabel}>Or Join as a New Local Demo Profile</Text>
+              <View style={styles.customRow}>
+                <TextInput
+                  style={[styles.input, { flex: 1, marginRight: 8 }]}
+                  placeholder="Your Name (e.g. Sarah J.)"
+                  value={customName}
+                  onChangeText={setCustomName}
+                />
+                <TextInput
+                  style={[styles.input, { flex: 1, marginRight: 8 }]}
+                  placeholder="Neighborhood"
+                  value={customNeighborhood}
+                  onChangeText={setCustomNeighborhood}
+                />
+                <TouchableOpacity
+                  style={styles.createProfileBtn}
+                  onPress={handleCreateCustomProfile}
+                >
+                  <Text style={styles.createProfileBtnText}>Use</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
 
-        {/* Simulate Live Neighbor Activity Button */}
-        <TouchableOpacity
-          style={styles.simulateBtn}
-          onPress={onSimulateNeighborAction}
-        >
-          <Text style={styles.simulateBtnText}>
-            ⚡ Simulate Neighbor Claiming a Share Live
-          </Text>
-        </TouchableOpacity>
+            {/* Simulate Live Neighbor Activity Button */}
+            <TouchableOpacity
+              style={styles.simulateBtn}
+              onPress={onSimulateNeighborAction}
+            >
+              <Text style={styles.simulateBtnText}>
+                Switch to another demo neighbor
+              </Text>
+            </TouchableOpacity>
+          </>
+        )}
       </View>
 
-      {/* Supabase Cloud Connection Setup */}
+      {/* Supabase Cloud Connection & Authenticated Session Setup */}
       <View style={styles.card}>
         <Text style={styles.cardTitle}>
-          ☁️ Connect Your Supabase Project (Real-Time Postgres)
+          ☁️ Authenticated Supabase Cloud Sync
         </Text>
         <Text style={styles.cardSub}>
-          1. Create a free project at supabase.com and run{' '}
-          <Text style={styles.codeInline}>supabase/schema.sql</Text> in the SQL
-          Editor.{'\n'}
-          2. Paste your Project URL and Anon Key below (or set{' '}
-          <Text style={styles.codeInline}>EXPO_PUBLIC_SUPABASE_URL</Text> and{' '}
-          <Text style={styles.codeInline}>EXPO_PUBLIC_SUPABASE_ANON_KEY</Text>{' '}
-          in <Text style={styles.codeInline}>.env</Text>).
+          1. Run <Text style={styles.codeInline}>supabase/schema.sql</Text> in your Supabase SQL Editor to install member-scoped RLS and transactional RPCs.{'\n'}
+          2. Enter your Project URL and Anon Key below, then sign in with an authenticated Supabase user account. Sample demo fixtures are never uploaded automatically.
         </Text>
 
         <Text style={styles.inputLabel}>Supabase Project URL</Text>
@@ -257,14 +342,14 @@ export const SupabaseSetupCard: React.FC<Props> = ({
         />
 
         <View style={styles.btnRow}>
-          {syncStatus.mode === 'supabase_live' ? (
+          {isCloudEnabled ? (
             <TouchableOpacity
               style={styles.disconnectBtn}
               onPress={handleDisconnectSupabase}
               disabled={isConnecting}
             >
               <Text style={styles.disconnectBtnText}>
-                Switch Back to Local Mode
+                Switch to Local Demo Mode
               </Text>
             </TouchableOpacity>
           ) : null}
@@ -281,19 +366,134 @@ export const SupabaseSetupCard: React.FC<Props> = ({
               <ActivityIndicator color="#FFFFFF" size="small" />
             ) : (
               <Text style={styles.connectBtnText}>
-                {syncStatus.mode === 'supabase_live'
-                  ? 'Reconnect & Reseed Cloud DB'
-                  : 'Connect & Sync Pools to Supabase'}
+                {isCloudEnabled
+                  ? 'Save & Refresh Cloud Sync'
+                  : 'Enable Cloud Mode'}
               </Text>
             )}
           </TouchableOpacity>
         </View>
 
-        <TouchableOpacity style={styles.resetButton} onPress={onResetDemo}>
-          <Text style={styles.resetButtonText}>
-            ↺ Reset All Demo Pools to Default
-          </Text>
-        </TouchableOpacity>
+        {/* Cloud Auth Session Controls when Cloud Mode is Enabled */}
+        {isCloudEnabled && (
+          <View style={styles.authBox}>
+            <Text style={styles.cardTitle}>
+              🔐 Cloud Account Session (Server-Verified Identity)
+            </Text>
+            {syncStatus.authenticatedUser ? (
+              <View>
+                <Text style={styles.cardSub}>
+                  Signed in as{' '}
+                  <Text style={{ fontWeight: '800', color: '#0F766E' }}>
+                    {syncStatus.authenticatedUser.name}
+                  </Text>{' '}
+                  ({syncStatus.authenticatedUser.email || syncStatus.authenticatedUser.id})
+                </Text>
+                {onCloudSignOut && (
+                  <TouchableOpacity
+                    style={styles.disconnectBtn}
+                    onPress={onCloudSignOut}
+                  >
+                    <Text style={styles.disconnectBtnText}>Sign Out of Cloud Session</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            ) : (
+              <View>
+                <Text style={styles.cardSub}>
+                  Sign in or register an authenticated Supabase account. Your server UID (`auth.uid()`) determines pool membership and host permissions.
+                </Text>
+                <TextInput
+                  style={[styles.input, { marginBottom: 8 }]}
+                  placeholder="Email address"
+                  autoCapitalize="none"
+                  value={authEmail}
+                  onChangeText={setAuthEmail}
+                />
+                <TextInput
+                  style={[styles.input, { marginBottom: 8 }]}
+                  placeholder="Password"
+                  secureTextEntry
+                  value={authPassword}
+                  onChangeText={setAuthPassword}
+                />
+                <View style={styles.customRow}>
+                  <TextInput
+                    style={[styles.input, { flex: 1, marginRight: 8 }]}
+                    placeholder="Display Name (for new account)"
+                    value={authDisplayName}
+                    onChangeText={setAuthDisplayName}
+                  />
+                  <TextInput
+                    style={[styles.input, { flex: 1 }]}
+                    placeholder="Neighborhood"
+                    value={authNeighborhood}
+                    onChangeText={setAuthNeighborhood}
+                  />
+                </View>
+                {!!authFormError && (
+                  <Text style={styles.errorText}>{authFormError}</Text>
+                )}
+                <View style={styles.btnRow}>
+                  <TouchableOpacity
+                    style={styles.connectBtn}
+                    onPress={handleSignIn}
+                    disabled={isConnecting || !authEmail.trim() || !authPassword}
+                  >
+                    <Text style={styles.connectBtnText}>Sign In to Cloud</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.disconnectBtn}
+                    onPress={handleSignUp}
+                    disabled={
+                      isConnecting ||
+                      !authEmail.trim() ||
+                      !authPassword ||
+                      !authDisplayName.trim()
+                    }
+                  >
+                    <Text style={styles.disconnectBtnText}>Create Account</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+          </View>
+        )}
+
+        {!isCloudEnabled && (
+          <>
+            <TouchableOpacity
+              style={styles.resetButton}
+              onPress={() => setConfirmReset(true)}
+            >
+              <Text style={styles.resetButtonText}>Reset local demo pools…</Text>
+            </TouchableOpacity>
+            {confirmReset && (
+              <View style={{ marginTop: 8 }}>
+                <Text style={styles.cardSub}>
+                  This replaces all local pool edits with sample data. It does not contact a cloud service.
+                </Text>
+                <View style={styles.btnRow}>
+                  <TouchableOpacity
+                    style={styles.connectBtn}
+                    onPress={() => {
+                      onResetDemo();
+                      setConfirmReset(false);
+                    }}
+                  >
+                    <Text style={styles.connectBtnText}>Confirm reset</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.disconnectBtn}
+                    onPress={() => setConfirmReset(false)}
+                  >
+                    <Text style={styles.disconnectBtnText}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+          </>
+        )}
       </View>
     </View>
   );
@@ -351,6 +551,32 @@ const styles = StyleSheet.create({
     color: '#475569',
     marginTop: 4,
     fontWeight: '600',
+  },
+  pendingBox: {
+    marginTop: 8,
+    padding: 10,
+    borderRadius: 10,
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1,
+    borderColor: '#FCD34D',
+  },
+  pendingText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#92400E',
+  },
+  retryPendingBtn: {
+    marginTop: 6,
+    alignSelf: 'flex-start',
+    backgroundColor: '#92400E',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  retryPendingText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '800',
   },
   errorText: {
     fontSize: 12,
@@ -510,6 +736,12 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 12,
     textAlign: 'center',
+  },
+  authBox: {
+    marginTop: 16,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
   },
   resetButton: {
     marginTop: 12,

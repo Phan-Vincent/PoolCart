@@ -4,7 +4,6 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  TextInput,
 } from 'react-native';
 import { GroupBuyPool, Participant, PastOrderReceipt } from '../types/groupBuy';
 import { getParticipantBreakdowns } from '../utils/calculations';
@@ -15,7 +14,6 @@ interface Props {
   activeUser: Participant;
   pastReceipts: PastOrderReceipt[];
   onReclaimReceiptItems: (receipt: PastOrderReceipt) => void;
-  onVerifyOtpEmail: (email: string) => void;
 }
 
 export const WalletHistoryView: React.FC<Props> = ({
@@ -24,13 +22,7 @@ export const WalletHistoryView: React.FC<Props> = ({
   activeUser,
   pastReceipts,
   onReclaimReceiptItems,
-  onVerifyOtpEmail,
 }) => {
-  const [emailInput, setEmailInput] = useState(
-    activeUser.email || 'vincent@poolcart.app'
-  );
-  const [otpInput, setOtpInput] = useState('');
-  const [otpSent, setOtpSent] = useState(false);
   const [reclaimedId, setReclaimedId] = useState<string | null>(null);
 
   // Calculate active savings across all open pools for activeUser
@@ -55,25 +47,14 @@ export const WalletHistoryView: React.FC<Props> = ({
 
   const lifetimeSaved = historicalSavings + activePoolsSavings;
   const lifetimeWholesaleSpend = historicalSpend + activePoolsSpend;
-  const totalRunsCount = pastReceipts.length + (activePoolsSpend > 0 ? 1 : 0);
-
-  const handleSendMagicCode = () => {
-    if (!emailInput.trim()) return;
-    setOtpSent(true);
-    setOtpInput('849201');
-  };
-
-  const handleConfirmOtp = () => {
-    onVerifyOtpEmail(emailInput.trim());
-    setOtpSent(false);
-  };
+  const totalRunsCount = pastReceipts.length + pools.filter((p) => (getParticipantBreakdowns(p).find((b) => b.userId === activeUser.id)?.totalDue ?? 0) > 0).length;
 
   return (
     <View style={styles.container}>
       {/* Lifetime Wholesale Savings Hero Card */}
       <View style={styles.heroCard}>
         <Text style={styles.heroLabel}>
-          💰 {activeUser.name.toUpperCase()} LIFETIME WHOLESALE SAVINGS
+          💰 {activeUser.name.toUpperCase()} ESTIMATED SAVINGS + SAMPLE HISTORY
         </Text>
         <Text style={styles.heroSavingsAmount}>
           ${lifetimeSaved.toFixed(2)} Saved
@@ -113,68 +94,21 @@ export const WalletHistoryView: React.FC<Props> = ({
         </View>
       </View>
 
-      {/* Feature #4: Verified Neighbor & Host Auth Status */}
       <View style={styles.authCard}>
-        <View style={styles.authHeaderRow}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.authTitle}>
-              🔐 Verified Neighbor Identity & Host Permissions
-            </Text>
-            <Text style={styles.authSub}>
-              Signed in as <Text style={{ fontWeight: '800' }}>{activeUser.name}</Text>{' '}
-              ({activeUser.email || 'Unverified email'})
-            </Text>
-          </View>
-          <View
-            style={[
-              styles.verifiedBadge,
-              activeUser.verifiedAuth
-                ? styles.verifiedBadgeGreen
-                : styles.verifiedBadgeAmber,
-            ]}
-          >
-            <Text
-              style={[
-                styles.verifiedBadgeText,
-                activeUser.verifiedAuth
-                  ? { color: '#15803D' }
-                  : { color: '#B45309' },
-              ]}
-            >
-              {activeUser.verifiedAuth ? '✓ Verified OTP' : 'Guest Profile'}
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.authInputRow}>
-          <TextInput
-            style={[styles.input, { flex: 1, marginRight: 8 }]}
-            placeholder="Email or Phone for Magic OTP"
-            autoCapitalize="none"
-            value={emailInput}
-            onChangeText={setEmailInput}
-          />
-          {!otpSent ? (
-            <TouchableOpacity
-              style={styles.otpBtn}
-              onPress={handleSendMagicCode}
-            >
-              <Text style={styles.otpBtnText}>Send OTP</Text>
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              style={[styles.otpBtn, { backgroundColor: '#0D9488' }]}
-              onPress={handleConfirmOtp}
-            >
-              <Text style={styles.otpBtnText}>Verify ({otpInput})</Text>
-            </TouchableOpacity>
-          )}
-        </View>
+        <Text style={styles.authTitle}>
+          {activeUser.verifiedAuth
+            ? `Authenticated cloud session: ${activeUser.name}`
+            : `Local demo profile: ${activeUser.name}`}
+        </Text>
+        <Text style={styles.authSub}>
+          {activeUser.verifiedAuth
+            ? `Signed in via Supabase Auth (${activeUser.email || activeUser.id}). Pool membership and host permissions are enforced on the server.`
+            : 'No authenticated sign-in or OTP service is active in local demo mode. Host permissions here only organize the local demo.'}
+        </Text>
       </View>
-
       {/* Past Runs & 1-Tap Re-Claim Staples */}
       <Text style={styles.sectionHeader}>
-        🧾 PAST NEIGHBORHOOD RECEIPTS & 1-TAP RE-ORDER ({pastReceipts.length})
+        🧾 SAMPLE HISTORICAL RECEIPTS & 1-TAP RE-ORDER ({pastReceipts.length})
       </Text>
 
       {pastReceipts.map((rec) => {
@@ -189,7 +123,7 @@ export const WalletHistoryView: React.FC<Props> = ({
               </View>
               <View style={{ alignItems: 'flex-end' }}>
                 <Text style={styles.receiptPaid}>
-                  ${rec.totalPaid.toFixed(2)} paid
+                  ${rec.totalPaid.toFixed(2)} sample total
                 </Text>
                 <Text style={styles.receiptSaved}>
                   Saved ${rec.totalSaved.toFixed(2)}
@@ -215,6 +149,7 @@ export const WalletHistoryView: React.FC<Props> = ({
                 styles.reclaimButton,
                 isReclaimed && styles.reclaimButtonSuccess,
               ]}
+              disabled={activePool.status === 'locked'}
               onPress={() => {
                 onReclaimReceiptItems(rec);
                 setReclaimedId(rec.id);
@@ -297,12 +232,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#E2E8F0',
   },
-  authHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 10,
-  },
   authTitle: {
     fontSize: 14,
     fontWeight: '800',
@@ -312,46 +241,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#64748B',
     marginTop: 2,
-  },
-  verifiedBadge: {
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-    borderRadius: 999,
-  },
-  verifiedBadgeGreen: {
-    backgroundColor: '#DCFCE7',
-  },
-  verifiedBadgeAmber: {
-    backgroundColor: '#FEF3C7',
-  },
-  verifiedBadgeText: {
-    fontSize: 10,
-    fontWeight: '800',
-  },
-  authInputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  input: {
-    backgroundColor: '#F8FAFC',
-    borderWidth: 1,
-    borderColor: '#CBD5E1',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontSize: 12,
-    color: '#0F172A',
-  },
-  otpBtn: {
-    backgroundColor: '#0F172A',
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    borderRadius: 10,
-  },
-  otpBtnText: {
-    color: '#FFFFFF',
-    fontSize: 11,
-    fontWeight: '800',
   },
   sectionHeader: {
     fontSize: 11,

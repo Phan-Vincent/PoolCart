@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   SafeAreaView,
   View,
@@ -11,6 +11,7 @@ import {
   TextInput,
   Linking,
   Platform,
+  Alert,
 } from 'react-native';
 import {
   CURRENT_USER,
@@ -18,14 +19,11 @@ import {
   PAST_USER_RECEIPTS,
 } from './src/data/mockPools';
 import {
-  AtomicClaimResult,
   CatalogItem,
   GroupBuyPool,
   NotificationPreferences,
   Participant,
-  ParticipantShare,
   PastOrderReceipt,
-  PoolMessage,
   PoolNotificationAlert,
   PorchDropCheckIn,
   ReceiptTrueUp,
@@ -36,6 +34,7 @@ import {
   evaluateAtomicClaimTransition,
   PoolRepository,
   SupabaseConfig,
+  SyncStatusInfo,
 } from './src/services/repository';
 import {
   DEFAULT_NOTIFICATION_PREFS,
@@ -45,10 +44,16 @@ import {
 import {
   buildShareablePoolInviteText,
   extractPoolCodeFromUrl,
-  getCaseSplitStatus,
   getParticipantBreakdowns,
   getPoolProgressSummary,
 } from './src/utils/calculations';
+import {
+  applyPoolAction,
+  isPoolHost,
+  newId,
+  normalizePools,
+  PoolAction,
+} from './src/utils/poolActions';
 import { PoolProgressCard } from './src/components/PoolProgressCard';
 import { CatalogItemCard } from './src/components/CatalogItemCard';
 import { SplitLedgerView } from './src/components/SplitLedgerView';
@@ -77,14 +82,39 @@ type ActiveTab =
   | 'wallet'
   | 'architecture';
 type ItemFilter = 'all' | 'individual' | 'case_split';
-type RadiusFilter = 'all' | 'under_1mi' | 'under_2mi';
+type RadiusFilter = 'all' | 'under_05mi' | 'under_2mi';
 
 export default function App() {
-  const [pools, setPools] = useState<GroupBuyPool[]>(INITIAL_POOLS);
+  const [pools, setPoolState] = useState<GroupBuyPool[]>(() =>
+    normalizePools(INITIAL_POOLS)
+  );
+  const poolsRef = useRef(pools);
+  const [ready, setReady] = useState(false);
+  const [storageError, setStorageError] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [paymentConfirmation, setPaymentConfirmation] = useState<{
+    poolId: string;
+    userId: string;
+    amount: number;
+  } | null>(null);
+  const [rerunSource, setRerunSource] = useState<GroupBuyPool | null>(null);
+
+  const setPools = (next: GroupBuyPool[]) => {
+    poolsRef.current = next;
+    setPoolState(next);
+    if (next.length > 0) {
+      PoolRepository.saveLocalPools(next)
+        .then(() => setStorageError(''))
+        .catch((error) => setStorageError(String(error.message || error)));
+    }
+  };
+
   const [selectedPoolId, setSelectedPoolId] = useState<string>(
     INITIAL_POOLS[0].id
   );
-  const [activeUser, setActiveUser] = useState<Participant>(CURRENT_USER);
+  const [localDemoUser, setLocalDemoUser] = useState<Participant>(CURRENT_USER);
+  const [cloudAuthUser, setCloudAuthUser] = useState<Participant | null>(null);
+
   const [activeTab, setActiveTab] = useState<ActiveTab>('catalog');
   const [itemFilter, setItemFilter] = useState<ItemFilter>('all');
   const [radiusFilter, setRadiusFilter] = useState<RadiusFilter>('all');
@@ -109,15 +139,17 @@ export default function App() {
     null
   );
 
-  const [syncStatus, setSyncStatus] = useState<{
-    mode: 'local' | 'supabase_live' | 'supabase_error';
-    lastSyncedAt: string | null;
-    errorMessage?: string;
-    lastRealtimeEvent?: string | null;
-  }>({
+  const [syncStatus, setSyncStatus] = useState<SyncStatusInfo>({
     mode: 'local',
+    label: 'Local demo mode — on-device storage',
     lastSyncedAt: null,
+    pendingLocalEditsCount: 0,
+    authenticatedUser: null,
   });
+
+  const isCloudMode = PoolRepository.getCurrentConfig().enabled;
+  const activeUser: Participant =
+    isCloudMode && cloudAuthUser ? cloudAuthUser : localDemoUser;
 
   const formatTimestamp = () => {
     const now = new Date();
@@ -133,25 +165,11 @@ export default function App() {
       setLiveToast(newItems[0]);
       setAlerts((prev) => {
         const merged = [...newItems, ...prev].slice(0, 40);
-        NotificationService.saveAlerts(merged);
+        NotificationService.saveAlerts(merged).catch((error) =>
+          setStorageError(`Alert feed: ${String(error)}`)
+        );
         return merged;
       });
-    },
-    []
-  );
-
-  const applyDeepLinkPoolCode = useCallback(
-    (code: string | null, poolList: GroupBuyPool[]) => {
-      if (!code) return;
-      const matched = poolList.find(
-        (p) =>
-          p.joinCode.toUpperCase() === code.toUpperCase() ||
-          p.id.toUpperCase() === code.toUpperCase()
-      );
-      if (matched) {
-        setSelectedPoolId(matched.id);
-        setActiveTab('catalog');
-      }
     },
     []
   );
@@ -159,13 +177,23 @@ export default function App() {
   const refreshPools = useCallback(
     async (realtimeTable?: string, initialDeepLinkCode?: string | null) => {
       const cfg = PoolRepository.getCurrentConfig();
-      const { pools: loaded, error } = await PoolRepository.loadPools();
+      const {
+        pools: loaded,
+        cloudState,
+        authenticatedUser,
+        pendingEditsCount,
+        error,
+      } = await PoolRepository.loadPools();
 
-      if (loaded && loaded.length > 0) {
-        setPools(loaded);
-        if (initialDeepLinkCode) {
-          applyDeepLinkPoolCode(initialDeepLinkCode, loaded);
-        } else {
+      setCloudAuthUser(authenticatedUser ?? null);
+
+      if (cloudState === 'empty_cloud') {
+        poolsRef.current = [];
+        setPoolState([]);
+      } else if (loaded && loaded.length > 0) {
+        poolsRef.current = loaded;
+        setPoolState(loaded);
+        if (!initialDeepLinkCode) {
           setSelectedPoolId((prev) =>
             loaded.some((p) => p.id === prev) ? prev : loaded[0].id
           );
@@ -173,55 +201,116 @@ export default function App() {
       }
 
       if (cfg.enabled && cfg.url && cfg.anonKey) {
-        if (error) {
-          setSyncStatus({
-            mode: 'supabase_error',
-            lastSyncedAt: formatTimestamp(),
-            errorMessage: error,
-          });
-        } else {
-          setSyncStatus((prev) => ({
-            mode: 'supabase_live',
-            lastSyncedAt: formatTimestamp(),
-            lastRealtimeEvent: realtimeTable
-              ? `Table '${realtimeTable}' updated`
-              : prev.lastRealtimeEvent,
-          }));
-        }
+        const modeMap: Record<typeof cloudState, SyncStatusInfo['mode']> = {
+          local_mode: 'local',
+          auth_required: 'supabase_auth_required',
+          empty_cloud: 'supabase_empty',
+          synced: 'supabase_live',
+          auth_rejected: 'supabase_auth_rejected',
+          network_unavailable: 'supabase_offline',
+          schema_or_query_error: 'supabase_error',
+        };
+        const labelMap: Record<typeof cloudState, string> = {
+          local_mode: 'Local demo mode — on-device storage',
+          auth_required: 'Cloud configured — sign in required to sync shared pools',
+          empty_cloud:
+            'Cloud connected (0 joined pools) — join by invite code or host a new pool',
+          synced: 'Supabase Cloud Connected (Authenticated Member Sync)',
+          auth_rejected:
+            'Cloud authorization rejected — local changes preserved on device',
+          network_unavailable:
+            'Cloud network unavailable — offline local fallback active',
+          schema_or_query_error:
+            'Supabase cloud query/schema error — local fallback active',
+        };
+        setSyncStatus((prev) => ({
+          mode: modeMap[cloudState],
+          label: labelMap[cloudState],
+          lastSyncedAt: formatTimestamp(),
+          errorMessage: error,
+          pendingLocalEditsCount: pendingEditsCount,
+          authenticatedUser: authenticatedUser ?? null,
+          lastRealtimeEvent: realtimeTable
+            ? `Table '${realtimeTable}' updated`
+            : prev.lastRealtimeEvent,
+        }));
       } else {
         setSyncStatus({
           mode: 'local',
+          label: 'Local demo mode — on-device storage',
           lastSyncedAt: formatTimestamp(),
+          pendingLocalEditsCount: pendingEditsCount,
+          authenticatedUser: null,
         });
       }
+
+      if (initialDeepLinkCode) {
+        const matched = loaded.find(
+          (p) =>
+            p.joinCode.toUpperCase() === initialDeepLinkCode.toUpperCase() ||
+            p.id.toUpperCase() === initialDeepLinkCode.toUpperCase()
+        );
+        if (matched) {
+          setSelectedPoolId(matched.id);
+          setActiveTab('catalog');
+        } else if (cfg.enabled && authenticatedUser) {
+          const joinRes = await PoolRepository.joinCloudPoolByInvite(
+            initialDeepLinkCode,
+            authenticatedUser
+          );
+          if (joinRes.poolId) {
+            await refreshPools();
+            setSelectedPoolId(joinRes.poolId);
+            setActiveTab('catalog');
+          } else {
+            setActionError(
+              joinRes.error ||
+                `Could not join cloud pool with code ${initialDeepLinkCode}.`
+            );
+          }
+        } else {
+          setActionError(
+            `No locally available pool matches invite code ${initialDeepLinkCode}. ${
+              cfg.enabled
+                ? 'Sign in to your cloud account to join shared pools by code.'
+                : 'Shared-cloud lookup is not connected.'
+            }`
+          );
+        }
+      }
     },
-    [applyDeepLinkPoolCode]
+    []
   );
 
   useEffect(() => {
     let unsubscribeRealtime = () => {};
 
     const bootstrap = async () => {
-      const [savedUser, savedAlerts, savedPrefs, cfg, initialUrl] =
-        await Promise.all([
-          PoolRepository.loadActiveUser(),
-          NotificationService.loadAlerts(),
-          NotificationService.loadPreferences(),
-          PoolRepository.initConfig(),
-          Linking.getInitialURL().catch(() => null),
-        ]);
+      try {
+        const [savedUser, savedAlerts, savedPrefs, cfg, initialUrl] =
+          await Promise.all([
+            PoolRepository.loadActiveUser(),
+            NotificationService.loadAlerts(),
+            NotificationService.loadPreferences(),
+            PoolRepository.initConfig(),
+            Linking.getInitialURL().catch(() => null),
+          ]);
 
-      setActiveUser(savedUser);
-      setAlerts(savedAlerts);
-      setNotifPrefs(savedPrefs);
+        setLocalDemoUser(savedUser);
+        setAlerts(savedAlerts);
+        setNotifPrefs(savedPrefs);
 
-      const codeFromUrl = extractPoolCodeFromUrl(initialUrl);
-      await refreshPools(undefined, codeFromUrl);
+        const codeFromUrl = extractPoolCodeFromUrl(initialUrl);
+        await refreshPools(undefined, codeFromUrl);
 
-      if (cfg.enabled) {
-        unsubscribeRealtime = PoolRepository.subscribeToRealtime((table) => {
-          refreshPools(table);
-        });
+        if (cfg.enabled) {
+          unsubscribeRealtime = PoolRepository.subscribeToRealtime((table) => {
+            refreshPools(table);
+          });
+        }
+        setReady(true);
+      } catch (error) {
+        setStorageError(String(error));
       }
     };
 
@@ -230,10 +319,7 @@ export default function App() {
     const sub = Linking.addEventListener('url', (event) => {
       const code = extractPoolCodeFromUrl(event.url);
       if (code) {
-        setPools((currentPools) => {
-          applyDeepLinkPoolCode(code, currentPools);
-          return currentPools;
-        });
+        refreshPools(undefined, code);
       }
     });
 
@@ -241,967 +327,665 @@ export default function App() {
       unsubscribeRealtime();
       sub.remove();
     };
-  }, [refreshPools, applyDeepLinkPoolCode]);
+  }, [refreshPools]);
+
+  useEffect(() => {
+    setSelectedCategory('All');
+    setSearchQuery('');
+    setItemFilter('all');
+    setShowAddItemModal(false);
+    setShowBulkImportModal(false);
+    setPaymentConfirmation(null);
+  }, [selectedPoolId, activeUser.id]);
 
   const visiblePools = pools.filter((p) => {
-    const dist = p.distanceMiles ?? 0.5;
-    if (radiusFilter === 'under_1mi') return dist <= 1.0;
+    const dist = p.distanceMiles ?? Infinity;
+    if (radiusFilter === 'under_05mi') return dist <= 0.5;
     if (radiusFilter === 'under_2mi') return dist <= 2.0;
     return true;
   });
 
-  const activePool =
+  const activePool: GroupBuyPool | undefined =
     pools.find((p) => p.id === selectedPoolId) ||
     visiblePools[0] ||
     pools[0];
 
-  // Determine whether the activeUser is the verified Host of activePool
-  const isCurrentUserHost = Boolean(
-    (activePool.hostUserId && activePool.hostUserId === activeUser.id) ||
-      activePool.participants.find((p) => p.id === activeUser.id)?.isHost ||
-      activePool.hostName.toLowerCase().includes(activeUser.name.toLowerCase())
-  );
+  const isCurrentUserHost = activePool
+    ? isPoolHost(activePool, activeUser.id)
+    : false;
+
+  const reportError = (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    setActionError(message);
+    Alert.alert('Action not completed', message);
+  };
+
+  const mutate = async (
+    action: PoolAction
+  ): Promise<{ pool: GroupBuyPool | null; cloudRejected?: boolean }> => {
+    if (!ready) return { pool: null };
+    try {
+      const current = poolsRef.current.find((p) => p.id === selectedPoolId);
+      if (!current) throw new Error('The selected pool is no longer available.');
+
+      if (isCloudMode) {
+        if (!cloudAuthUser) {
+          throw new Error(
+            'Sign in with an authenticated cloud account on the Sync tab before modifying shared pools.'
+          );
+        }
+        if (action.type === 'authorizeDemo' || action.type === 'captureDemo') {
+          throw new Error(
+            'Simulated card holds are local-demo-only and cannot be used in cloud mode.'
+          );
+        }
+      }
+
+      const next = applyPoolAction(current, activeUser, action);
+      const updatedList = poolsRef.current.map((p) =>
+        p.id === current.id ? next : p
+      );
+      setActionError('');
+      setPools(updatedList);
+
+      if (isCloudMode && cloudAuthUser) {
+        const syncRes = await PoolRepository.syncCloudPoolAction(
+          current,
+          cloudAuthUser,
+          action
+        );
+        if (syncRes.error) {
+          const pending = await PoolRepository.loadPendingCloudEdits();
+          setSyncStatus((prev) => ({
+            ...prev,
+            mode:
+              syncRes.state === 'auth_rejected'
+                ? 'supabase_auth_rejected'
+                : syncRes.state === 'network_unavailable'
+                ? 'supabase_offline'
+                : 'supabase_error',
+            label:
+              syncRes.state === 'auth_rejected'
+                ? 'Cloud authorization rejected — local edit preserved as unsaved'
+                : syncRes.state === 'network_unavailable'
+                ? 'Cloud offline — local edit queued on device'
+                : 'Cloud sync error — local edit preserved on device',
+            errorMessage: syncRes.error,
+            pendingLocalEditsCount: pending.length,
+          }));
+          reportError(
+            new Error(
+              `Cloud rejected or could not save this change (${syncRes.error}). Your pending edit is preserved locally on this device.`
+            )
+          );
+          return { pool: next, cloudRejected: true };
+        }
+        await refreshPools();
+      }
+
+      return { pool: next };
+    } catch (error) {
+      reportError(error);
+      return { pool: null };
+    }
+  };
+
+  const announce = (pool: GroupBuyPool, title: string, body: string) =>
+    pushAlerts([
+      NotificationService.createAlert(pool, 'case_locked', title, body),
+    ]);
 
   const handleSelectUser = async (user: Participant) => {
-    setActiveUser(user);
-    await PoolRepository.saveActiveUser(user);
+    if (isCloudMode) {
+      reportError(
+        new Error(
+          'Demo profile switching is disabled while cloud sync is active.'
+        )
+      );
+      return;
+    }
+    const profile = { ...user, verifiedAuth: false };
+    setLocalDemoUser(profile);
+    try {
+      await PoolRepository.saveActiveUser(profile);
+    } catch (error) {
+      setStorageError(String(error));
+    }
   };
 
   const handleSwitchToPoolHost = async () => {
-    const hostParticipant =
-      activePool.participants.find((p) => p.isHost) ||
-      DEMO_PROFILES.find((p) => p.id === activePool.hostUserId) ||
-      DEMO_PROFILES[1];
-    if (hostParticipant) {
-      await handleSelectUser(hostParticipant);
+    if (!activePool) return;
+    if (isCloudMode) {
+      reportError(
+        new Error(
+          'In cloud mode, host permissions require signing in as the pool host account.'
+        )
+      );
+      return;
+    }
+    const host =
+      activePool.participants.find((p) => p.id === activePool.hostUserId) ||
+      activePool.participants.find((p) => p.isHost);
+    if (host) await handleSelectUser(host);
+  };
+
+  const handleConfigSaved = async (config: SupabaseConfig) => {
+    try {
+      await PoolRepository.saveSupabaseConfig(config);
+      await refreshPools();
+    } catch (error) {
+      reportError(error);
     }
   };
 
-  const handleVerifyOtpEmail = async (email: string) => {
-    const updatedUser: Participant = {
-      ...activeUser,
+  const handleCloudSignIn = async (
+    email: string,
+    password: string,
+    displayName: string,
+    neighborhood: string
+  ) => {
+    const { user } = await PoolRepository.signInCloudWithPassword(
       email,
-      verifiedAuth: true,
-    };
-    await handleSelectUser(updatedUser);
-    const alert = NotificationService.createAlert(
-      activePool,
-      'case_locked',
-      `🔐 Verified Neighbor Identity: ${updatedUser.name}`,
-      `Your profile (${email}) is now OTP-verified for neighborhood pools and host permissions.`
+      password,
+      displayName,
+      neighborhood
     );
-    await pushAlerts([alert]);
+    setCloudAuthUser(user);
+    await refreshPools();
   };
 
-  const handleConfigSaved = async (newConfig: SupabaseConfig) => {
-    await PoolRepository.saveSupabaseConfig(newConfig);
-    await refreshPools();
-    if (newConfig.enabled) {
-      PoolRepository.subscribeToRealtime((table) => {
-        refreshPools(table);
-      });
+  const handleCloudSignUp = async (
+    email: string,
+    password: string,
+    displayName: string,
+    neighborhood: string
+  ) => {
+    const { user, requiresEmailConfirmation } =
+      await PoolRepository.signUpCloudAccount(
+        email,
+        password,
+        displayName,
+        neighborhood
+      );
+    if (requiresEmailConfirmation) {
+      Alert.alert(
+        'Check your email',
+        'Confirmation link sent. Sign in once your account is confirmed.'
+      );
+      return;
     }
+    setCloudAuthUser(user);
+    await refreshPools();
+  };
+
+  const handleCloudSignOut = async () => {
+    await PoolRepository.signOutCloud();
+    setCloudAuthUser(null);
+    await refreshPools();
+  };
+
+  const handleFlushPendingEdits = async () => {
+    if (!cloudAuthUser) {
+      reportError(
+        new Error('Sign in to your cloud account before retrying pending edits.')
+      );
+      return;
+    }
+    const res = await PoolRepository.flushPendingCloudEdits(
+      poolsRef.current,
+      cloudAuthUser
+    );
+    await refreshPools();
+    if (res.error) {
+      reportError(new Error(`Pending edit retry failed: ${res.error}`));
+    }
+  };
+
+  const handleJoinByInviteCode = async (
+    code: string
+  ): Promise<{ poolId?: string; error?: string }> => {
+    if (!isCloudMode) {
+      const matched = poolsRef.current.find(
+        (p) =>
+          p.joinCode.toUpperCase() === code.toUpperCase() ||
+          p.id.toUpperCase() === code.toUpperCase()
+      );
+      return matched
+        ? { poolId: matched.id }
+        : { error: `No local pool found with code "${code}".` };
+    }
+    if (!cloudAuthUser) {
+      return {
+        error:
+          'Sign in with an authenticated cloud account on the Sync tab before joining a cloud pool.',
+      };
+    }
+    const res = await PoolRepository.joinCloudPoolByInvite(code, cloudAuthUser);
+    if (res.poolId) {
+      await refreshPools();
+      return { poolId: res.poolId };
+    }
+    return { error: res.error || 'Could not join cloud pool.' };
   };
 
   const handleSharePoolInvite = async () => {
+    if (!activePool) return;
     try {
-      const message = buildShareablePoolInviteText(activePool);
       await Share.share({
-        title: `Join ${activePool.title} (${activePool.joinCode}) on PoolCart`,
-        message,
+        title: activePool.title,
+        message: buildShareablePoolInviteText(activePool),
       });
-    } catch (err) {
-      console.warn('Share error:', err);
+    } catch (error) {
+      reportError(error);
     }
   };
 
-  /**
-   * Race-Condition-Safe Atomic Case-Split & Wholesale Claim Handler
-   */
   const handleUpdateQuantity = async (itemId: string, delta: number) => {
-    if (activePool.status === 'locked') return;
-
-    const targetItem = activePool.items.find((i) => i.id === itemId);
-    if (!targetItem) return;
-
-    const prevPoolSnapshot = activePool;
-    let atomicResult: AtomicClaimResult | null = null;
-    let nextQuantityForSync = 0;
-
-    const updatedPools: GroupBuyPool[] = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-
-      const hasParticipant = pool.participants.some(
-        (p) => p.id === activeUser.id
-      );
-      const updatedParticipants = hasParticipant
-        ? pool.participants
-        : [...pool.participants, activeUser];
-
-      const updatedItems = pool.items.map((item) => {
-        if (item.id !== itemId) return item;
-
-        const { updatedClaims, result } = evaluateAtomicClaimTransition(
-          item,
-          activeUser,
-          delta
-        );
-        atomicResult = result;
-        nextQuantityForSync = result.newUserQuantity;
-
-        return { ...item, claims: updatedClaims };
-      });
-
-      return {
-        ...pool,
-        participants: updatedParticipants,
-        items: updatedItems,
-      };
+    const before = poolsRef.current.find((p) => p.id === selectedPoolId);
+    const item = before?.items.find((i) => i.id === itemId);
+    if (!before || !item) return;
+    const result = evaluateAtomicClaimTransition(item, activeUser, delta).result;
+    const { pool: next, cloudRejected } = await mutate({
+      type: 'claim',
+      itemId,
+      delta,
     });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    const nextPoolSnapshot =
-      updatedPools.find((p) => p.id === activePool.id) || activePool;
-
-    if (atomicResult) {
-      const triggered = NotificationService.evaluateClaimMilestones(
-        prevPoolSnapshot,
-        nextPoolSnapshot,
-        targetItem,
-        atomicResult,
-        notifPrefs
+    if (next && !cloudRejected) {
+      await pushAlerts(
+        NotificationService.evaluateClaimMilestones(
+          before,
+          next,
+          item,
+          result,
+          notifPrefs
+        )
       );
-      if (triggered.length > 0) {
-        await pushAlerts(triggered);
-      }
-    }
-
-    if (PoolRepository.getCurrentConfig().enabled) {
-      const { error } = await PoolRepository.syncAtomicClaimDelta(
-        activePool.id,
-        itemId,
-        activeUser,
-        delta,
-        nextQuantityForSync
-      );
-      if (error) {
-        setSyncStatus((prev) => ({
-          ...prev,
-          mode: 'supabase_error',
-          errorMessage: error,
-        }));
-      } else {
-        setSyncStatus((prev) => ({
-          ...prev,
-          mode: 'supabase_live',
-          lastSyncedAt: formatTimestamp(),
-        }));
-      }
     }
   };
 
-  /**
-   * Track #2: Bulk Catalog Paste & Smart Receipt OCR Handlers
-   */
-  const handleOpenBulkImportModal = (
-    mode: 'catalog_import' | 'receipt_ocr'
-  ) => {
+  const handleOpenBulkImportModal = (mode: 'catalog_import' | 'receipt_ocr') => {
+    if (!activePool) return;
+    if (mode === 'receipt_ocr' && !isCurrentUserHost) return;
+    if (mode === 'catalog_import' && activePool.status === 'locked') return;
     setBulkImportMode(mode);
     setShowBulkImportModal(true);
   };
 
-  const handleImportCatalogItems = async (importedItems: CatalogItem[]) => {
-    const updatedPools = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-      return {
-        ...pool,
-        items: [...importedItems, ...pool.items],
-      };
+  const handleImportCatalogItems = async (items: CatalogItem[]) => {
+    const { pool: next, cloudRejected } = await mutate({
+      type: 'addItems',
+      items,
     });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    const alert = NotificationService.createAlert(
-      activePool,
-      'case_locked',
-      `📋 Imported ${importedItems.length} Wholesale Items!`,
-      `Added ${importedItems.length} bulk items directly into ${activePool.title}.`
-    );
-    await pushAlerts([alert]);
-  };
-
-  const handleApplyParsedReceipt = async (
-    priceUpdates: { itemId: string; newPrice: number }[],
-    detectedTaxOrFee: number,
-    note: string
-  ) => {
-    const reconciledTime = formatTimestamp();
-    const updatedPools = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-      const nextItems = pool.items.map((it) => {
-        const match = priceUpdates.find((u) => u.itemId === it.id);
-        return match ? { ...it, actualUnitPrice: match.newPrice } : it;
-      });
-      return {
-        ...pool,
-        items: nextItems,
-        trueUp: {
-          ...pool.trueUp,
-          taxOrBagFee: detectedTaxOrFee,
-          receiptNote: note,
-          reconciledAt: reconciledTime,
-        },
-      };
-    });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    const alert = NotificationService.createAlert(
-      activePool,
-      'minimum_met',
-      `📸 Receipt OCR True-Up Applied (${priceUpdates.length} items)!`,
-      `Updated ${priceUpdates.length} item prices and $${detectedTaxOrFee.toFixed(2)} receipt tax/CRV across all neighbor splits.`
-    );
-    await pushAlerts([alert]);
-  };
-
-  /**
-   * Track #3: Stripe PaymentIntent Pre-Authorization Hold & Batch Capture
-   */
-  const handleAuthorizeStripeHold = async (userId: string, amount: number) => {
-    const holdId = `pi_${Date.now().toString(36)}`;
-    const updatedPools: GroupBuyPool[] = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-      return {
-        ...pool,
-        participants: pool.participants.map((p) =>
-          p.id === userId
-            ? {
-                ...p,
-                paidStatus: 'stripe_authorized',
-                stripeHoldId: holdId,
-                stripeAuthorizedAmount: amount,
-              }
-            : p
-        ),
-      };
-    });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    const alert = NotificationService.createAlert(
-      activePool,
-      'minimum_met',
-      `💳 Stripe Card Hold Authorized ($${amount.toFixed(2)})`,
-      `PaymentIntent (${holdId}) placed on manual capture—$0 charged until the pool locks at cutoff.`
-    );
-    await pushAlerts([alert]);
-  };
-
-  const handleCaptureAllStripeHolds = async () => {
-    let capturedCount = 0;
-    const updatedPools: GroupBuyPool[] = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-      return {
-        ...pool,
-        participants: pool.participants.map((p) => {
-          if (p.paidStatus === 'stripe_authorized') {
-            capturedCount += 1;
-            return { ...p, paidStatus: 'paid' };
-          }
-          return p;
-        }),
-      };
-    });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    if (capturedCount > 0) {
-      const alert = NotificationService.createAlert(
-        activePool,
-        'minimum_met',
-        `⚡ Captured ${capturedCount} Stripe Hold(s)!`,
-        `All authorized neighbor card holds in ${activePool.title} have been captured and marked ✓ Paid.`
+    if (next && !cloudRejected) {
+      await announce(
+        next,
+        `Imported ${items.length} items`,
+        'No shares were automatically claimed by this import.'
       );
-      await pushAlerts([alert]);
     }
   };
 
-  /**
-   * Track #4: Porch Cooler Drop-Off Check-In Handler
-   */
-  const handleUpdatePorchCheckIn = async (checkIn: PorchDropCheckIn) => {
-    const updatedPools = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-      return {
-        ...pool,
-        porchCheckIn: checkIn,
-      };
+  const handleApplyParsedReceipt = async (
+    prices: { itemId: string; newPrice: number }[],
+    taxOrBagFee: number,
+    receiptNote: string
+  ) => {
+    const current = poolsRef.current.find((p) => p.id === selectedPoolId);
+    if (!current) return;
+    const { pool: next, cloudRejected } = await mutate({
+      type: 'receipt',
+      prices,
+      trueUp: {
+        ...current.trueUp,
+        taxOrBagFee,
+        receiptNote,
+        reconciledAt: formatTimestamp(),
+      },
     });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    if (checkIn.status === 'ready_on_porch') {
-      const alert = NotificationService.createAlert(
-        activePool,
-        'porch_pickup_ready',
-        `🧊 Cooler Drop Ready on Porch (${activePool.joinCode})!`,
-        `${checkIn.coolerLocationNote} • Access: ${checkIn.accessCodeOrPin || 'Open Porch'}`
+    if (next && !cloudRejected) {
+      await announce(
+        next,
+        'Receipt text applied',
+        'Review the updated ledger. Changed settlement amounts require confirmation again.'
       );
-      await pushAlerts([alert]);
+    }
+  };
+
+  const handleAuthorizeDemoHold = async (userId: string, _amount: number) => {
+    const { pool: next, cloudRejected } = await mutate({
+      type: 'authorizeDemo',
+      userId,
+    });
+    if (next && !cloudRejected) {
+      await announce(
+        next,
+        'Demo hold recorded',
+        'Simulation only. No card was authorized and no funds moved.'
+      );
+    }
+  };
+
+  const handleCaptureAllDemoHolds = async () => {
+    const { pool: next, cloudRejected } = await mutate({ type: 'captureDemo' });
+    if (next && !cloudRejected) {
+      await announce(
+        next,
+        'Demo capture completed',
+        'Simulation only. Demo status is separate from manually confirmed payment.'
+      );
+    }
+  };
+
+  const handleUpdatePorchCheckIn = async (checkIn: PorchDropCheckIn) => {
+    const { pool: next, cloudRejected } = await mutate({
+      type: 'porch',
+      checkIn,
+    });
+    if (
+      next &&
+      !cloudRejected &&
+      checkIn.status === 'ready_on_porch' &&
+      notifPrefs.porchDropArrival
+    ) {
+      await pushAlerts([
+        NotificationService.createAlert(
+          next,
+          'porch_pickup_ready',
+          'Porch pickup ready (local alert)',
+          checkIn.coolerLocationNote
+        ),
+      ]);
     }
   };
 
   const handlePledgeWishlist = async (wishId: string) => {
-    const updatedPools = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-      const updatedWish = (pool.wishlist || []).map((w) => {
-        if (w.id !== wishId) return w;
-        const exists = w.pledgedUserIds.includes(activeUser.id);
-        const nextPledges = exists
-          ? w.pledgedUserIds.filter((id) => id !== activeUser.id)
-          : [...w.pledgedUserIds, activeUser.id];
-        return { ...w, pledgedUserIds: nextPledges };
-      });
-      return { ...pool, wishlist: updatedWish };
-    });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
+    await mutate({ type: 'pledge', wishId });
   };
-
   const handleAddWishlistRequest = async (
     req: Omit<WishlistRequest, 'id' | 'poolId'>
   ) => {
-    const newWish: WishlistRequest = {
-      ...req,
-      id: `wish_${Date.now()}`,
-      poolId: activePool.id,
-    };
-
-    const updatedPools = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-      return {
-        ...pool,
-        wishlist: [newWish, ...(pool.wishlist || [])],
-      };
+    if (!activePool) return;
+    await mutate({
+      type: 'request',
+      wish: { ...req, id: newId('wish'), poolId: activePool.id },
     });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
   };
-
   const handlePromoteWishlistToCatalog = async (wish: WishlistRequest) => {
-    const initialClaims: ParticipantShare[] = wish.pledgedUserIds.map((uid) => {
-      const known =
-        activePool.participants.find((p) => p.id === uid) ||
-        DEMO_PROFILES.find((p) => p.id === uid);
-      return {
-        userId: uid,
-        userName: known ? known.name : 'Neighbor',
-        avatarColor: known ? known.avatarColor : '#0D9488',
-        quantity: 1,
-      };
-    });
-
-    const newItem: CatalogItem = {
-      id: `item_wish_${Date.now()}`,
-      name: wish.title,
-      category: wish.category,
-      emoji: wish.emoji,
-      mode: 'case_split',
-      unitLabel: wish.suggestedUnitLabel,
-      unitPrice: wish.estimatedUnitPrice,
-      retailPrice: wish.estimatedRetailPrice,
-      caseSize: wish.targetCaseSize,
-      claims: initialClaims,
-    };
-
-    const updatedPools = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-      return {
-        ...pool,
-        items: [newItem, ...pool.items],
-        wishlist: (pool.wishlist || []).map((w) =>
-          w.id === wish.id ? { ...w, promotedToCatalog: true } : w
-        ),
-      };
-    });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    const alert = NotificationService.createAlert(
-      activePool,
-      'case_locked',
-      `🎉 Wishlist Promoted: ${wish.emoji} ${wish.title}`,
-      `Host approved ${wish.title} with ${initialClaims.length}/${wish.targetCaseSize} pledged shares already claimed!`
-    );
-    await pushAlerts([alert]);
+    await mutate({ type: 'promote', wishId: wish.id });
   };
-
   const handleUpdateItemActualPrice = async (
     itemId: string,
-    actualPrice: number | undefined
+    price: number | undefined
   ) => {
-    const updatedPools = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-      return {
-        ...pool,
-        items: pool.items.map((it) =>
-          it.id === itemId ? { ...it, actualUnitPrice: actualPrice } : it
-        ),
-      };
-    });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
+    await mutate({ type: 'price', itemId, price });
   };
-
   const handleUpdateReceiptTrueUp = async (trueUp: ReceiptTrueUp) => {
-    const updatedPools = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-      return {
-        ...pool,
-        trueUp,
-      };
-    });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    const alert = NotificationService.createAlert(
-      activePool,
-      'minimum_met',
-      `🧾 Wholesale Receipt True-Up Reconciled!`,
-      `${activePool.title} splits have been updated against the final register receipt (${trueUp.receiptNote}).`
-    );
-    await pushAlerts([alert]);
+    await mutate({ type: 'receipt', trueUp });
   };
-
   const handleReclaimReceiptItems = async (receipt: PastOrderReceipt) => {
-    const updatedPools = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-
-      const hasParticipant = pool.participants.some(
-        (p) => p.id === activeUser.id
-      );
-      const nextParticipants = hasParticipant
-        ? pool.participants
-        : [...pool.participants, activeUser];
-
-      const nextItems = [...pool.items];
-
-      receipt.items.forEach((pastItem) => {
-        const existingIdx = nextItems.findIndex(
-          (i) => i.name.toLowerCase() === pastItem.name.toLowerCase()
-        );
-
-        if (existingIdx >= 0) {
-          const item = nextItems[existingIdx];
-          const existingClaim = item.claims.find(
-            (c) => c.userId === activeUser.id
-          );
-          const nextClaims = existingClaim
-            ? item.claims.map((c) =>
-                c.userId === activeUser.id
-                  ? { ...c, quantity: c.quantity + pastItem.quantity }
-                  : c
-              )
-            : [
-                ...item.claims,
-                {
-                  userId: activeUser.id,
-                  userName: activeUser.name,
-                  avatarColor: activeUser.avatarColor,
-                  quantity: pastItem.quantity,
-                },
-              ];
-          nextItems[existingIdx] = { ...item, claims: nextClaims };
-        } else {
-          nextItems.unshift({
-            id: `item_reclaim_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
-            name: pastItem.name,
-            category: 'Re-Ordered Staple',
-            emoji: pastItem.emoji,
-            mode: pastItem.mode,
-            unitLabel: pastItem.unitLabel,
-            unitPrice: pastItem.unitPrice,
-            retailPrice: pastItem.retailPrice,
-            caseSize: pastItem.caseSize,
-            claims: [
-              {
-                userId: activeUser.id,
-                userName: activeUser.name,
-                avatarColor: activeUser.avatarColor,
-                quantity: pastItem.quantity,
-              },
-            ],
-          });
-        }
-      });
-
-      return {
-        ...pool,
-        participants: nextParticipants,
-        items: nextItems,
-      };
-    });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    const alert = NotificationService.createAlert(
-      activePool,
-      'case_locked',
-      `🔁 Re-Claimed ${receipt.items.length} Weekly Staples!`,
-      `Added your items from "${receipt.poolTitle}" into ${activePool.title}.`
-    );
-    await pushAlerts([alert]);
+    await mutate({ type: 'reorder', receipt });
   };
-
   const handleSendMessage = async (text: string, isAnnouncement: boolean) => {
-    const newMsg: PoolMessage = {
-      id: `msg_${Date.now()}`,
-      poolId: activePool.id,
-      userId: activeUser.id,
-      userName: activeUser.name,
-      avatarColor: activeUser.avatarColor,
-      isHost: isCurrentUserHost,
-      isAnnouncement,
-      text,
-      createdAt: formatTimestamp(),
-    };
-
-    const updatedPools: GroupBuyPool[] = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-      return {
-        ...pool,
-        messages: [...(pool.messages || []), newMsg],
-      };
+    if (!activePool) return;
+    const { pool: next, cloudRejected } = await mutate({
+      type: 'message',
+      message: {
+        id: newId('msg'),
+        poolId: activePool.id,
+        userId: activeUser.id,
+        userName: activeUser.name,
+        avatarColor: activeUser.avatarColor,
+        isAnnouncement,
+        text,
+        createdAt: formatTimestamp(),
+      },
     });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    if (isAnnouncement && notifPrefs.porchDropArrival) {
-      const alert = NotificationService.createAlert(
-        activePool,
-        'porch_pickup_ready',
-        `📢 Host Announcement (${activePool.joinCode})`,
-        text
-      );
-      await pushAlerts([alert]);
-    }
-
-    if (PoolRepository.getCurrentConfig().enabled) {
-      await PoolRepository.syncNewMessage(newMsg);
+    if (next && !cloudRejected && isAnnouncement && notifPrefs.porchDropArrival) {
+      await announce(next, 'Host announcement (local alert)', text);
     }
   };
 
   const handleTriggerCutoffReminder = async () => {
-    const summary = getPoolProgressSummary(activePool);
-    const openCases = activePool.items
-      .map((i) => ({ item: i, status: getCaseSplitStatus(i) }))
-      .filter((x) => x.item.mode === 'case_split' && x.status.neededForNextCase > 0);
-
-    const caseDetail =
-      openCases.length > 0
-        ? ` ${openCases[0].item.emoji} ${openCases[0].item.name} only needs ${openCases[0].status.neededForNextCase} more share(s) to lock the case!`
-        : '';
-
-    const alert = NotificationService.createAlert(
-      activePool,
-      'cutoff_reminder',
-      `⏰ 2 Hours Until Cutoff (${activePool.cutoffTime})`,
-      `Pool is at $${summary.combinedPoolTotal.toFixed(2)} / $${activePool.minimumOrderAmount} min.${caseDetail}`
-    );
-    await pushAlerts([alert]);
+    if (!activePool || !notifPrefs.cutoffReminder2h) return;
+    await pushAlerts([
+      NotificationService.createAlert(
+        activePool,
+        'cutoff_reminder',
+        'Cutoff reminder (manual, local)',
+        `Order cutoff: ${activePool.cutoffTime}. No scheduled notification was sent.`
+      ),
+    ]);
   };
 
   const handleTriggerPorchReadyAlert = async () => {
-    const alert = NotificationService.createAlert(
-      activePool,
-      'porch_pickup_ready',
-      `🛍️ Porch Pickup Ready: ${activePool.title}!`,
-      `Wholesale order has been sorted at ${activePool.pickupAddress}. Pickup window: ${activePool.pickupWindow}.`
-    );
-    await pushAlerts([alert]);
+    if (
+      !activePool ||
+      !isCurrentUserHost ||
+      !notifPrefs.porchDropArrival ||
+      activePool.porchCheckIn?.status !== 'ready_on_porch'
+    )
+      return;
+    await pushAlerts([
+      NotificationService.createAlert(
+        activePool,
+        'porch_pickup_ready',
+        'Porch pickup ready (local alert)',
+        activePool.pickupWindow
+      ),
+    ]);
   };
 
   const handleToggleNotifPref = async (key: keyof NotificationPreferences) => {
     const updated = { ...notifPrefs, [key]: !notifPrefs[key] };
     setNotifPrefs(updated);
-    await NotificationService.savePreferences(updated);
+    try {
+      await NotificationService.savePreferences(updated);
+    } catch (error) {
+      reportError(error);
+    }
   };
 
   const handleMarkAllAlertsRead = async () => {
     const updated = alerts.map((a) => ({ ...a, read: true }));
     setAlerts(updated);
-    await NotificationService.saveAlerts(updated);
+    try {
+      await NotificationService.saveAlerts(updated);
+    } catch (error) {
+      reportError(error);
+    }
   };
 
   const handleRerunWeeklyPool = async () => {
-    const nowTs = Date.now();
-    const prefix = activePool.joinCode.split('-')[0] || 'POOL';
-    const nextCode = `${prefix}-${Math.floor(10 + Math.random() * 89)}`;
-
-    const clonedItems: CatalogItem[] = activePool.items.map((item, idx) => ({
-      ...item,
-      id: `item_${nowTs}_${idx}`,
-      actualUnitPrice: undefined,
-      claims:
-        idx === 0
-          ? [
-              {
-                userId: activeUser.id,
-                userName: activeUser.name,
-                avatarColor: activeUser.avatarColor,
-                quantity: 1,
-              },
-            ]
-          : [],
-    }));
-
-    const rerunPool: GroupBuyPool = {
-      ...activePool,
-      id: `pool_${nowTs}`,
-      joinCode: nextCode,
-      hostUserId: activeUser.id,
-      hostName: activeUser.name,
-      title: `${activePool.title.replace(/ \(Next Week\)$/, '')} (Next Week)`,
-      status: 'open',
-      trueUp: undefined,
-      participants: [
-        {
-          ...activeUser,
-          isHost: true,
-          paidStatus: 'paid',
-          pickedUp: false,
-        },
-      ],
-      items: clonedItems,
-      messages: [
-        {
-          id: `msg_${nowTs}`,
-          poolId: `pool_${nowTs}`,
-          userId: activeUser.id,
-          userName: activeUser.name,
-          avatarColor: activeUser.avatarColor,
-          isHost: true,
-          isAnnouncement: true,
-          text: `New weekly run launched from our ${activePool.supplierName} catalog! Invite code: ${nextCode}`,
-          createdAt: formatTimestamp(),
-        },
-      ],
-    };
-
-    const updatedPools = [rerunPool, ...pools];
-    setPools(updatedPools);
-    setSelectedPoolId(rerunPool.id);
-    setActiveTab('catalog');
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    if (PoolRepository.getCurrentConfig().enabled) {
-      await PoolRepository.syncNewPool(rerunPool);
-    }
+    if (!activePool || !isCurrentUserHost) return;
+    setRerunSource(activePool);
+    setShowCreatePoolModal(true);
   };
-
   const handleToggleLockPool = async () => {
-    const nextStatus: 'open' | 'locked' =
-      activePool.status === 'locked' ? 'open' : 'locked';
-
-    const updatedPools: GroupBuyPool[] = pools.map((pool) =>
-      pool.id === activePool.id ? { ...pool, status: nextStatus } : pool
-    );
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    if (PoolRepository.getCurrentConfig().enabled) {
-      await PoolRepository.syncPoolStatus(activePool.id, nextStatus);
-    }
+    await mutate({ type: 'lock' });
   };
-
   const handleHostCoverRemainder = async (
     itemId: string,
-    neededQty: number
+    _neededQty: number
   ) => {
-    const hostParticipant =
-      activePool.participants.find((p) => p.isHost) || activeUser;
-    const targetItem = activePool.items.find((i) => i.id === itemId);
-    const prevPoolSnapshot = activePool;
-
-    let syncedQty = neededQty;
-    let atomicResult: AtomicClaimResult | null = null;
-
-    const updatedPools: GroupBuyPool[] = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-
-      const updatedItems = pool.items.map((item) => {
-        if (item.id !== itemId) return item;
-        const { updatedClaims, result } = evaluateAtomicClaimTransition(
-          item,
-          hostParticipant,
-          neededQty
-        );
-        atomicResult = result;
-        syncedQty = result.newUserQuantity;
-        return { ...item, claims: updatedClaims };
-      });
-
-      return { ...pool, items: updatedItems };
-    });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    const nextPoolSnapshot =
-      updatedPools.find((p) => p.id === activePool.id) || activePool;
-    if (atomicResult && targetItem) {
-      const triggered = NotificationService.evaluateClaimMilestones(
-        prevPoolSnapshot,
-        nextPoolSnapshot,
-        targetItem,
-        atomicResult,
-        notifPrefs
-      );
-      if (triggered.length > 0) {
-        await pushAlerts(triggered);
-      }
-    }
-
-    if (PoolRepository.getCurrentConfig().enabled) {
-      await PoolRepository.syncAtomicClaimDelta(
-        activePool.id,
-        itemId,
-        hostParticipant,
-        neededQty,
-        syncedQty
-      );
-    }
+    await mutate({ type: 'cover', itemId });
   };
-
   const handleTrimPartialCase = async (itemId: string) => {
-    let trimmedClaimsForSync: ParticipantShare[] = [];
-
-    const updatedPools: GroupBuyPool[] = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-
-      const updatedItems = pool.items.map((item) => {
-        if (item.id !== itemId) return item;
-        const status = getCaseSplitStatus(item);
-        if (status.remainderUnits === 0) return item;
-
-        let toRemove = status.remainderUnits;
-        const reversed = [...item.claims].reverse();
-        const adjustedReversed: ParticipantShare[] = [];
-
-        for (const claim of reversed) {
-          if (toRemove <= 0) {
-            adjustedReversed.push(claim);
-          } else if (claim.quantity <= toRemove) {
-            toRemove -= claim.quantity;
-          } else {
-            adjustedReversed.push({
-              ...claim,
-              quantity: claim.quantity - toRemove,
-            });
-            toRemove = 0;
-          }
-        }
-
-        trimmedClaimsForSync = adjustedReversed.reverse();
-        return { ...item, claims: trimmedClaimsForSync };
-      });
-
-      return { ...pool, items: updatedItems };
-    });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    if (PoolRepository.getCurrentConfig().enabled) {
-      await PoolRepository.syncItemClaimsList(
-        activePool.id,
-        itemId,
-        trimmedClaimsForSync
-      );
-    }
+    await mutate({ type: 'trim', itemId });
   };
-
   const handleSimulateNeighborAction = async () => {
-    const otherNeighbors = DEMO_PROFILES.filter((p) => p.id !== activeUser.id);
-    const randomNeighbor =
-      otherNeighbors[Math.floor(Math.random() * otherNeighbors.length)] ||
-      DEMO_PROFILES[1];
+    if (isCloudMode) return;
+    const neighbor = DEMO_PROFILES.find((p) => p.id !== activeUser.id);
+    if (neighbor) await handleSelectUser(neighbor);
+  };
+  const handleAddItem = async (item: CatalogItem) => {
+    await mutate({ type: 'addItems', items: [item] });
+  };
 
-    const targetItem =
-      activePool.items.find((i) => i.mode === 'case_split') ||
-      activePool.items[0];
-    if (!targetItem) return;
-
-    const prevPoolSnapshot = activePool;
-    let simulatedNextQty = 1;
-    let atomicResult: AtomicClaimResult | null = null;
-
-    const updatedPools: GroupBuyPool[] = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-
-      const hasNeighbor = pool.participants.some(
-        (p) => p.id === randomNeighbor.id
-      );
-      const updatedParticipants = hasNeighbor
-        ? pool.participants
-        : [...pool.participants, randomNeighbor];
-
-      const updatedItems = pool.items.map((item) => {
-        if (item.id !== targetItem.id) return item;
-        const { updatedClaims, result } = evaluateAtomicClaimTransition(
-          item,
-          randomNeighbor,
-          1
-        );
-        atomicResult = result;
-        simulatedNextQty = result.newUserQuantity;
-        return { ...item, claims: updatedClaims };
-      });
-
-      return {
-        ...pool,
-        participants: updatedParticipants,
-        items: updatedItems,
-      };
-    });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    const nextPoolSnapshot =
-      updatedPools.find((p) => p.id === activePool.id) || activePool;
-    if (atomicResult) {
-      const triggered = NotificationService.evaluateClaimMilestones(
-        prevPoolSnapshot,
-        nextPoolSnapshot,
-        targetItem,
-        atomicResult,
-        notifPrefs
-      );
-      if (triggered.length > 0) {
-        await pushAlerts(triggered);
+  const handleCreatePool = async (pool: GroupBuyPool) => {
+    try {
+      if (isCloudMode) {
+        if (!cloudAuthUser) {
+          throw new Error(
+            'Sign in with an authenticated cloud account before hosting a cloud pool.'
+          );
+        }
+        const cloudPool: GroupBuyPool = {
+          ...pool,
+          hostUserId: cloudAuthUser.id,
+          hostName: cloudAuthUser.name,
+          participants: [
+            {
+              ...cloudAuthUser,
+              isHost: true,
+              paidStatus: 'pending',
+              pickedUp: false,
+            },
+          ],
+        };
+        const res = await PoolRepository.createCloudPool(cloudPool);
+        if (res.error) {
+          const next = normalizePools([cloudPool, ...poolsRef.current]);
+          setPools(next);
+          setSelectedPoolId(cloudPool.id);
+          reportError(
+            new Error(
+              `Cloud pool creation could not complete (${res.error}). Preserved locally as a pending edit.`
+            )
+          );
+          return;
+        }
+        await refreshPools();
+        setSelectedPoolId(res.poolId || cloudPool.id);
+      } else {
+        const next = normalizePools([
+          { ...pool, hostUserId: activeUser.id },
+          ...poolsRef.current,
+        ]);
+        setPools(next);
+        setSelectedPoolId(pool.id);
       }
-    }
-
-    if (PoolRepository.getCurrentConfig().enabled) {
-      await PoolRepository.syncAtomicClaimDelta(
-        activePool.id,
-        targetItem.id,
-        randomNeighbor,
-        1,
-        simulatedNextQty
-      );
-    }
-
-    setSyncStatus((prev) => ({
-      ...prev,
-      lastSyncedAt: formatTimestamp(),
-      lastRealtimeEvent: `${randomNeighbor.name.split(' ')[0]} claimed +1 ${targetItem.emoji}`,
-    }));
-  };
-
-  const handleAddItem = async (newItem: CatalogItem) => {
-    const updatedPools = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-      const hasParticipant = pool.participants.some(
-        (p) => p.id === activeUser.id
-      );
-      return {
-        ...pool,
-        participants: hasParticipant
-          ? pool.participants
-          : [...pool.participants, activeUser],
-        items: [newItem, ...pool.items],
-      };
-    });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    if (PoolRepository.getCurrentConfig().enabled) {
-      await PoolRepository.syncNewItem(activePool.id, newItem, activeUser);
-    }
-  };
-
-  const handleCreatePool = async (newPool: GroupBuyPool) => {
-    const poolWithHostId: GroupBuyPool = {
-      ...newPool,
-      hostUserId: activeUser.id,
-      distanceMiles: 0.2,
-    };
-    const updatedPools = [poolWithHostId, ...pools];
-    setPools(updatedPools);
-    setSelectedPoolId(poolWithHostId.id);
-    setActiveTab('catalog');
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    if (PoolRepository.getCurrentConfig().enabled) {
-      await PoolRepository.syncNewPool(poolWithHostId);
+      setSelectedCategory('All');
+      setSearchQuery('');
+      setActiveTab('catalog');
+      setRerunSource(null);
+    } catch (error) {
+      reportError(error);
     }
   };
 
   const handleTogglePaidStatus = async (userId: string) => {
-    let nextStatus: 'pending' | 'paid' = 'paid';
-
-    const updatedPools: GroupBuyPool[] = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-      return {
-        ...pool,
-        participants: pool.participants.map((p) => {
-          if (p.id !== userId) return p;
-          nextStatus = p.paidStatus === 'paid' ? 'pending' : 'paid';
-          return {
-            ...p,
-            paidStatus: nextStatus,
-          };
-        }),
-      };
-    });
-
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-
-    if (PoolRepository.getCurrentConfig().enabled) {
-      await PoolRepository.syncPaidStatus(activePool.id, userId, nextStatus);
+    if (!activePool || !isCurrentUserHost) return;
+    const amount =
+      getParticipantBreakdowns(activePool).find((b) => b.userId === userId)
+        ?.totalDue ?? 0;
+    setPaymentConfirmation({ poolId: activePool.id, userId, amount });
+  };
+  const handleTogglePickedUp = async (userId: string) => {
+    await mutate({ type: 'pickup', userId });
+  };
+  const handleResetDemo = async () => {
+    try {
+      const fresh = await PoolRepository.resetDemoData();
+      poolsRef.current = fresh;
+      setPoolState(fresh);
+      setSelectedPoolId(fresh[0].id);
+      setStorageError('');
+    } catch (error) {
+      reportError(error);
     }
   };
 
-  const handleTogglePickedUp = async (userId: string) => {
-    const updatedPools: GroupBuyPool[] = pools.map((pool) => {
-      if (pool.id !== activePool.id) return pool;
-      return {
-        ...pool,
-        participants: pool.participants.map((p) =>
-          p.id === userId ? { ...p, pickedUp: !p.pickedUp } : p
-        ),
-      };
-    });
+  if (!ready) {
+    return (
+      <SafeAreaView style={{ flex: 1, padding: 24 }}>
+        <Text>
+          {storageError
+            ? `Saved data could not be loaded: ${storageError}. It has not been overwritten. Restart after restoring a valid backup.`
+            : 'Loading saved pools…'}
+        </Text>
+      </SafeAreaView>
+    );
+  }
 
-    setPools(updatedPools);
-    await PoolRepository.saveLocalPools(updatedPools);
-  };
-
-  const handleResetDemo = async () => {
-    const fresh = await PoolRepository.resetDemoData();
-    setPools(fresh);
-    setSelectedPoolId(fresh[0].id);
-  };
+  // Empty cloud state when connected to Supabase with 0 joined pools
+  if (!activePool) {
+    return (
+      <View style={styles.outerShell}>
+        <SafeAreaView style={styles.safeArea}>
+          <StatusBar barStyle="dark-content" />
+          <View style={styles.header}>
+            <Text style={styles.brandTitle}>🥬 PoolCart Cloud</Text>
+            <View style={styles.headerActions}>
+              <TouchableOpacity
+                style={styles.codeJoinButton}
+                onPress={() => setShowJoinByCodeModal(true)}
+              >
+                <Text style={styles.codeJoinButtonText}>🔑 Join by Code</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.newPoolButton}
+                onPress={() => {
+                  setRerunSource(null);
+                  setShowCreatePoolModal(true);
+                }}
+              >
+                <Text style={styles.newPoolButtonText}>+ Host Pool</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+          <ScrollView contentContainerStyle={{ padding: 16 }}>
+            <View
+              style={{
+                backgroundColor: '#FFFFFF',
+                borderRadius: 16,
+                padding: 16,
+                marginBottom: 14,
+                borderWidth: 1,
+                borderColor: '#E2E8F0',
+              }}
+            >
+              <Text style={{ fontSize: 16, fontWeight: '800', color: '#0F172A' }}>
+                No Joined Cloud Pools Yet
+              </Text>
+              <Text style={{ fontSize: 12, color: '#64748B', marginTop: 6 }}>
+                Sample demo fixtures are never uploaded automatically to your cloud database. Enter a neighbor invite code or host a new pool to begin.
+              </Text>
+            </View>
+            <SupabaseSetupCard
+              activeUser={activeUser}
+              onSelectUser={handleSelectUser}
+              syncStatus={syncStatus}
+              onConfigSaved={handleConfigSaved}
+              onCloudSignIn={handleCloudSignIn}
+              onCloudSignUp={handleCloudSignUp}
+              onCloudSignOut={handleCloudSignOut}
+              onFlushPendingEdits={handleFlushPendingEdits}
+              onSimulateNeighborAction={handleSimulateNeighborAction}
+              onResetDemo={handleResetDemo}
+            />
+          </ScrollView>
+          <CreatePoolModal
+            key={'empty_new_' + activeUser.id + String(showCreatePoolModal)}
+            visible={showCreatePoolModal}
+            activeUser={activeUser}
+            onClose={() => setShowCreatePoolModal(false)}
+            onCreatePool={handleCreatePool}
+          />
+          <JoinByCodeModal
+            visible={showJoinByCodeModal}
+            pools={pools}
+            isCloudMode={isCloudMode}
+            onClose={() => setShowJoinByCodeModal(false)}
+            onSelectPoolId={(poolId) => {
+              setSelectedPoolId(poolId);
+              setActiveTab('catalog');
+            }}
+            onJoinByInviteCode={handleJoinByInviteCode}
+          />
+        </SafeAreaView>
+      </View>
+    );
+  }
 
   // Build dynamic categories for the active pool
   const availableCategories = [
@@ -1233,6 +1017,66 @@ export default function App() {
       <SafeAreaView style={styles.safeArea}>
         <StatusBar barStyle="dark-content" />
 
+        <Text style={{ padding: 8, backgroundColor: '#FEF3C7', fontSize: 11 }}>
+          {isCloudMode
+            ? `Cloud mode (${syncStatus.label}) • card holds remain local-only • manual settlement requires host verification`
+            : 'Local demo • profiles are simulated • card actions move no funds • cloud sync available in Sync tab'}
+        </Text>
+        {!!actionError && (
+          <View style={{ padding: 10, backgroundColor: '#FEE2E2' }}>
+            <Text>Action not completed: {actionError}</Text>
+            <TouchableOpacity onPress={() => setActionError('')}>
+              <Text>Dismiss</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+        {!!storageError && (
+          <View style={{ padding: 10, backgroundColor: '#FEE2E2' }}>
+            <Text>Changes are not saved: {storageError}</Text>
+            <TouchableOpacity onPress={() => setPools(poolsRef.current)}>
+              <Text>Retry saving pools</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+        {paymentConfirmation && (
+          <View style={{ padding: 12, backgroundColor: '#FEF3C7' }}>
+            <Text>
+              Record or remove a manual payment confirmation for $
+              {paymentConfirmation.amount.toFixed(2)}? Verify the received funds
+              independently first. Demo holds and opening Venmo are not payment
+              evidence.
+            </Text>
+            <TouchableOpacity
+              onPress={async () => {
+                const pending = paymentConfirmation;
+                const current = poolsRef.current.find(
+                  (p) => p.id === selectedPoolId
+                )!;
+                if (
+                  pending.poolId !== selectedPoolId ||
+                  getParticipantBreakdowns(current).find(
+                    (b) => b.userId === pending.userId
+                  )?.totalDue !== pending.amount
+                ) {
+                  reportError(
+                    new Error(
+                      'The pool or amount changed. Review the ledger and confirm again.'
+                    )
+                  );
+                } else {
+                  await mutate({ type: 'paid', userId: pending.userId });
+                }
+                setPaymentConfirmation(null);
+              }}
+            >
+              <Text>Confirm manual record</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setPaymentConfirmation(null)}>
+              <Text>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
         {/* Header */}
         <View style={styles.header}>
           <View style={{ flex: 1 }}>
@@ -1256,7 +1100,7 @@ export default function App() {
                   ]}
                 />
                 <Text style={styles.syncPillText}>
-                  {syncStatus.mode === 'supabase_live' ? 'Live' : 'Local'}
+                  {syncStatus.mode === 'supabase_live' ? 'Cloud Live' : isCloudMode ? 'Cloud' : 'Local'}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -1288,7 +1132,7 @@ export default function App() {
               style={styles.qrFlyerButton}
               onPress={() => setShowPilotFlyerModal(true)}
             >
-              <Text style={styles.qrFlyerButtonText}>🖨️ QR</Text>
+              <Text style={styles.qrFlyerButtonText}>Invite</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -1300,7 +1144,10 @@ export default function App() {
 
             <TouchableOpacity
               style={styles.newPoolButton}
-              onPress={() => setShowCreatePoolModal(true)}
+              onPress={() => {
+                setRerunSource(null);
+                setShowCreatePoolModal(true);
+              }}
             >
               <Text style={styles.newPoolButtonText}>+ Host</Text>
             </TouchableOpacity>
@@ -1324,7 +1171,7 @@ export default function App() {
             {(
               [
                 { key: 'all', label: 'All Rancho Cucamonga' },
-                { key: 'under_1mi', label: '< 0.5 mi (Walkable)' },
+                { key: 'under_05mi', label: '< 0.5 mi (Walkable)' },
                 { key: 'under_2mi', label: '< 2.0 mi' },
               ] as const
             ).map((r) => (
@@ -1384,8 +1231,11 @@ export default function App() {
                       isSelected && styles.poolPillMetaSelected,
                     ]}
                   >
-                    [{pool.joinCode}] • {pool.distanceMiles ?? 0.4} mi • $
-                    {poolSummary.combinedPoolTotal.toFixed(0)}/$
+                    [{pool.joinCode}] •{' '}
+                    {pool.distanceMiles !== undefined
+                      ? `${pool.distanceMiles} mi`
+                      : 'distance unknown'}{' '}
+                    • ${poolSummary.combinedPoolTotal.toFixed(0)}/$
                     {pool.minimumOrderAmount}
                   </Text>
                 </TouchableOpacity>
@@ -1409,8 +1259,12 @@ export default function App() {
               </Text>
               <Text style={styles.poolMainTitle}>{activePool.title}</Text>
               <Text style={styles.supplierSubText}>
-                Supplier: {activePool.supplierName} • Host: {activePool.hostName}{' '}
-                ({activePool.distanceMiles ?? 0.4} mi away)
+                Supplier: {activePool.supplierName} • Host:{' '}
+                {activePool.hostName} (
+                {activePool.distanceMiles !== undefined
+                  ? `${activePool.distanceMiles} mi`
+                  : 'distance unknown'}
+                )
               </Text>
             </View>
 
@@ -1418,7 +1272,7 @@ export default function App() {
               style={styles.howItWorksPill}
               onPress={() => setShowPilotFlyerModal(true)}
             >
-              <Text style={styles.howItWorksText}>👋 Guide & QR</Text>
+              <Text style={styles.howItWorksText}>👋 Guide & Invite</Text>
             </TouchableOpacity>
           </View>
 
@@ -1611,7 +1465,9 @@ export default function App() {
                   <View style={{ flexDirection: 'row', gap: 6 }}>
                     <TouchableOpacity
                       style={styles.bulkPasteBtn}
-                      onPress={() => handleOpenBulkImportModal('catalog_import')}
+                      onPress={() =>
+                        handleOpenBulkImportModal('catalog_import')
+                      }
                     >
                       <Text style={styles.bulkPasteBtnText}>📋 Bulk Paste</Text>
                     </TouchableOpacity>
@@ -1639,6 +1495,7 @@ export default function App() {
 
               {/* Feature #1: Neighbor Bulk Split Wishlist & Upvotes */}
               <WishlistSection
+                key={activePool.id + activeUser.id}
                 pool={activePool}
                 activeUser={activeUser}
                 isCurrentUserHost={isCurrentUserHost}
@@ -1651,16 +1508,18 @@ export default function App() {
 
           {activeTab === 'splits' && (
             <SplitLedgerView
+              key={activePool.id + activeUser.id}
               pool={activePool}
               currentUserId={activeUser.id}
               isCurrentUserHost={isCurrentUserHost}
               onTogglePaidStatus={handleTogglePaidStatus}
-              onAuthorizeStripeHold={handleAuthorizeStripeHold}
+              onAuthorizeDemoHold={handleAuthorizeDemoHold}
             />
           )}
 
           {activeTab === 'chat' && (
             <PoolChatView
+              key={activePool.id + activeUser.id}
               pool={activePool}
               activeUser={activeUser}
               onSendMessage={handleSendMessage}
@@ -1669,6 +1528,12 @@ export default function App() {
 
           {activeTab === 'host_sheet' && (
             <HostOrderSheetView
+              key={
+                activePool.id +
+                activeUser.id +
+                JSON.stringify(activePool.trueUp) +
+                JSON.stringify(activePool.porchCheckIn)
+              }
               pool={activePool}
               activeUser={activeUser}
               isCurrentUserHost={isCurrentUserHost}
@@ -1680,7 +1545,7 @@ export default function App() {
               onUpdateItemActualPrice={handleUpdateItemActualPrice}
               onUpdateReceiptTrueUp={handleUpdateReceiptTrueUp}
               onOpenBulkImportModal={handleOpenBulkImportModal}
-              onCaptureAllStripeHolds={handleCaptureAllStripeHolds}
+              onCaptureAllDemoHolds={handleCaptureAllDemoHolds}
               onUpdatePorchCheckIn={handleUpdatePorchCheckIn}
               onTogglePaidStatus={handleTogglePaidStatus}
               onTogglePickedUp={handleTogglePickedUp}
@@ -1689,12 +1554,14 @@ export default function App() {
 
           {activeTab === 'wallet' && (
             <WalletHistoryView
+              key={activePool.id + activeUser.id}
               pools={pools}
               activePool={activePool}
               activeUser={activeUser}
-              pastReceipts={PAST_USER_RECEIPTS}
+              pastReceipts={
+                activeUser.id === CURRENT_USER.id ? PAST_USER_RECEIPTS : []
+              }
               onReclaimReceiptItems={handleReclaimReceiptItems}
-              onVerifyOtpEmail={handleVerifyOtpEmail}
             />
           )}
 
@@ -1704,6 +1571,10 @@ export default function App() {
               onSelectUser={handleSelectUser}
               syncStatus={syncStatus}
               onConfigSaved={handleConfigSaved}
+              onCloudSignIn={handleCloudSignIn}
+              onCloudSignUp={handleCloudSignUp}
+              onCloudSignOut={handleCloudSignOut}
+              onFlushPendingEdits={handleFlushPendingEdits}
               onSimulateNeighborAction={handleSimulateNeighborAction}
               onResetDemo={handleResetDemo}
             />
@@ -1748,6 +1619,7 @@ export default function App() {
 
         {/* Modals */}
         <AddItemModal
+          key={activePool.id + activeUser.id + String(showAddItemModal)}
           visible={showAddItemModal}
           activeUser={activeUser}
           onClose={() => setShowAddItemModal(false)}
@@ -1755,6 +1627,12 @@ export default function App() {
         />
 
         <CreatePoolModal
+          key={
+            (rerunSource?.id || 'new') +
+            activeUser.id +
+            String(showCreatePoolModal)
+          }
+          sourcePool={rerunSource ?? undefined}
           visible={showCreatePoolModal}
           activeUser={activeUser}
           onClose={() => setShowCreatePoolModal(false)}
@@ -1764,11 +1642,13 @@ export default function App() {
         <JoinByCodeModal
           visible={showJoinByCodeModal}
           pools={pools}
+          isCloudMode={isCloudMode}
           onClose={() => setShowJoinByCodeModal(false)}
           onSelectPoolId={(poolId) => {
             setSelectedPoolId(poolId);
             setActiveTab('catalog');
           }}
+          onJoinByInviteCode={handleJoinByInviteCode}
         />
 
         <NotificationCenterModal
@@ -1780,6 +1660,10 @@ export default function App() {
           onTogglePref={handleToggleNotifPref}
           onTriggerCutoffReminder={handleTriggerCutoffReminder}
           onTriggerPorchReadyAlert={handleTriggerPorchReadyAlert}
+          canNotifyPorch={
+            isCurrentUserHost &&
+            activePool.porchCheckIn?.status === 'ready_on_porch'
+          }
           onMarkAllRead={handleMarkAllAlertsRead}
         />
 
@@ -1790,6 +1674,13 @@ export default function App() {
         />
 
         <BulkImportModal
+          key={
+            activePool.id +
+            activeUser.id +
+            bulkImportMode +
+            String(showBulkImportModal)
+          }
+          isCurrentUserHost={isCurrentUserHost}
           visible={showBulkImportModal}
           pool={activePool}
           activeUser={activeUser}

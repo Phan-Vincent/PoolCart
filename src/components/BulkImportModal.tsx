@@ -10,9 +10,10 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { newId } from '../utils/poolActions';
 import { CatalogItem, GroupBuyPool, Participant } from '../types/groupBuy';
 import {
-  parseBulkCatalogText,
+  parseBulkCatalog,
   parseReceiptTrueUpText,
   SAMPLE_BULK_CATALOG_TEXT,
   SAMPLE_RECEIPT_OCR_TEXT,
@@ -20,6 +21,7 @@ import {
 
 interface Props {
   visible: boolean;
+  isCurrentUserHost: boolean;
   pool: GroupBuyPool;
   activeUser: Participant;
   initialMode?: 'catalog_import' | 'receipt_ocr';
@@ -34,6 +36,7 @@ interface Props {
 
 export const BulkImportModal: React.FC<Props> = ({
   visible,
+  isCurrentUserHost,
   pool,
   activeUser,
   initialMode = 'catalog_import',
@@ -47,16 +50,18 @@ export const BulkImportModal: React.FC<Props> = ({
   );
   const [receiptRawText, setReceiptRawText] = useState(SAMPLE_RECEIPT_OCR_TEXT);
 
-  const previewItems = parseBulkCatalogText(catalogRawText, activeUser);
+  const catalogPreview = parseBulkCatalog(catalogRawText);
+  const previewItems = catalogPreview.items;
   const receiptPreview = parseReceiptTrueUpText(receiptRawText, pool.items);
 
   const handleConfirmCatalogImport = () => {
-    if (previewItems.length === 0) return;
-    onImportCatalogItems(previewItems);
+    if (previewItems.length === 0 || catalogPreview.errors.length || pool.status === 'locked') return;
+    onImportCatalogItems(previewItems.map((item) => ({ ...item, id: newId('item') })));
     onClose();
   };
 
   const handleConfirmReceiptOcr = () => {
+    if (!isCurrentUserHost || receiptPreview.errors.length || (!receiptPreview.matches.length && !receiptPreview.detectedTaxOrFee)) return;
     const updates = receiptPreview.matches.map((m) => ({
       itemId: m.itemId,
       newPrice: m.newReceiptPrice,
@@ -64,7 +69,7 @@ export const BulkImportModal: React.FC<Props> = ({
     onApplyParsedReceipt(
       updates,
       receiptPreview.detectedTaxOrFee,
-      `Auto-reconciled ${updates.length} items from scanned wholesale receipt`
+      `Auto-reconciled ${updates.length} items from pasted per-unit receipt text`
     );
     onClose();
   };
@@ -100,6 +105,7 @@ export const BulkImportModal: React.FC<Props> = ({
                 tab === 'receipt_ocr' && styles.switchBtnActive,
               ]}
               onPress={() => setTab('receipt_ocr')}
+              disabled={!isCurrentUserHost}
             >
               <Text
                 style={[
@@ -107,7 +113,7 @@ export const BulkImportModal: React.FC<Props> = ({
                   tab === 'receipt_ocr' && styles.switchTextActive,
                 ]}
               >
-                📸 Receipt OCR Scanner
+                🧾 Receipt Text (Host)
               </Text>
             </TouchableOpacity>
           </View>
@@ -161,12 +167,10 @@ export const BulkImportModal: React.FC<Props> = ({
             ) : (
               <View>
                 <Text style={styles.title}>
-                  Smart Wholesale Receipt Scanner & True-Up
+                  Receipt Text & True-Up
                 </Text>
                 <Text style={styles.subtitle}>
-                  Paste OCR text from your supplier register receipt (or tap
-                  "Simulate Camera Scan") to auto-match catalog items and
-                  update every neighbor’s split pro-rata:
+                  Paste explicit per-share prices as “Item Name @ $3.00 /unit” and fees as “Tax $4.50”. No camera or OCR service is connected. Check every match before applying; fees replace the previous receipt fee total.
                 </Text>
 
                 <TextInput
@@ -217,6 +221,8 @@ export const BulkImportModal: React.FC<Props> = ({
                 </View>
               </View>
             )}
+          {(tab === 'catalog_import' ? catalogPreview.errors : receiptPreview.errors).map((error, idx) =>
+            <Text key={idx} style={{ color: '#B91C1C', marginBottom: 4 }}>Line {error.line}: {error.message}</Text>)}
           </ScrollView>
 
           <View style={styles.actionsRow}>
@@ -227,6 +233,7 @@ export const BulkImportModal: React.FC<Props> = ({
               <TouchableOpacity
                 style={styles.saveBtn}
                 onPress={handleConfirmCatalogImport}
+                disabled={catalogPreview.errors.length > 0 || !previewItems.length || pool.status === 'locked'}
               >
                 <Text style={styles.saveBtnText}>
                   + Import {previewItems.length} Items to Pool
@@ -236,6 +243,7 @@ export const BulkImportModal: React.FC<Props> = ({
               <TouchableOpacity
                 style={styles.saveBtn}
                 onPress={handleConfirmReceiptOcr}
+                disabled={!isCurrentUserHost || receiptPreview.errors.length > 0 || (!receiptPreview.matches.length && !receiptPreview.detectedTaxOrFee)}
               >
                 <Text style={styles.saveBtnText}>
                   ✓ Apply Receipt True-Up ({receiptPreview.matches.length})

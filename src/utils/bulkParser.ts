@@ -1,213 +1,105 @@
 import { CatalogItem, Participant } from '../types/groupBuy';
+import { requireNumber } from './poolActions';
 
 export interface ParsedReceiptMatch {
-  itemId: string;
-  itemName: string;
-  emoji: string;
-  previousPrice: number;
-  newReceiptPrice: number;
+  itemId: string; itemName: string; emoji: string; previousPrice: number; newReceiptPrice: number;
 }
-
-const EMOJI_KEYWORDS: { keywords: string[]; emoji: string; category: string }[] = [
-  { keywords: ['avocado', 'strawberr', 'apple', 'lettuce', 'spinach', 'berry', 'produce', 'mango', 'tomato'], emoji: '🥑', category: 'Produce' },
-  { keywords: ['milk', 'oat', 'butter', 'cheese', 'yogurt', 'cream', 'egg'], emoji: '🥛', category: 'Dairy & Eggs' },
-  { keywords: ['beef', 'wagyu', 'brisket', 'ribeye', 'pork', 'chicken', 'meat', 'steak'], emoji: '🥩', category: 'Meat & Seafood' },
-  { keywords: ['scallop', 'shrimp', 'salmon', 'fish', 'seafood', 'crab'], emoji: '🐚', category: 'Meat & Seafood' },
-  { keywords: ['rice', 'flour', 'grain', 'oat', 'noodle', 'pasta', 'bread'], emoji: '🌾', category: 'Grains & Staples' },
-  { keywords: ['dumpling', 'gyoza', 'frozen', 'bun', 'ice'], emoji: '🥟', category: 'Frozen' },
-  { keywords: ['oil', 'honey', 'sauce', 'chili', 'pantry', 'spice'], emoji: '🫒', category: 'Pantry' },
-  { keywords: ['water', 'kombucha', 'tea', 'coffee', 'drink', 'juice'], emoji: '🫧', category: 'Beverages' },
+export interface ParseIssue { line: number; message: string; }
+const categoryRules: [RegExp, string, string][] = [
+  [/\b(avocados?|apples?|lettuce|spinach|berries|strawberries|mango|tomato)\b/i, '🥑', 'Produce'],
+  [/\b(milk|butter|cheese|yogurt|cream|eggs?)\b/i, '🥛', 'Dairy & Eggs'],
+  [/\b(beef|pork|chicken|meat|steak|scallops?|shrimp|salmon|fish)\b/i, '🥩', 'Meat & Seafood'],
+  [/\b(rice|flour|grains?|oats?|noodles?|pasta|bread)\b/i, '🌾', 'Grains & Staples'],
+  [/\b(dumplings?|gyoza|frozen)\b/i, '🥟', 'Frozen'],
+  [/\b(oil|honey|sauce|chili|pantry|spice)\b/i, '🫒', 'Pantry'],
 ];
-
-function inferEmojiAndCategory(name: string): { emoji: string; category: string } {
-  const lower = name.toLowerCase();
-  for (const entry of EMOJI_KEYWORDS) {
-    if (entry.keywords.some((kw) => lower.includes(kw))) {
-      return { emoji: entry.emoji, category: entry.category };
-    }
-  }
-  return { emoji: '📦', category: 'Wholesale Bulk' };
+function decimal(raw: string, label: string, min = 0.01): number {
+  const clean = raw.trim().replace(/^\$/, '');
+  if (!/^\d+(?:\.\d{1,2})?$/.test(clean)) throw new Error(`${label}: use an unsigned amount with at most two decimal places (no thousands separators).`);
+  return requireNumber(Number(clean), label, min);
 }
-
-/**
- * Track #2A: Parses pasted supplier price list lines into structured `CatalogItem` objects.
- * Supports flexible formats such as:
- * - "Organic Fuji Apples (40 lb Case) | $12.50 | $18.99 | 4 | 8 lb share"
- * - "Kirkland Almond Flour 3 lb, 11.00, 16.50, 1, 3 lb bag"
- * - "Oatly Barista 6-Pack Case - $3.25 ($5.49 retail) x6"
- */
-export function parseBulkCatalogText(
-  rawText: string,
-  creator: Participant
-): CatalogItem[] {
-  const lines = rawText
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l.length > 2 && !l.startsWith('#') && !l.startsWith('//'));
-
-  const nowTs = Date.now();
-  const parsedItems: CatalogItem[] = [];
-
-  lines.forEach((line, idx) => {
-    // Check pipe or comma separated format first: Name | UnitPrice | RetailPrice | CaseSize | UnitLabel
-    const parts = line.includes('|')
-      ? line.split('|').map((p) => p.trim())
-      : line.split(',').map((p) => p.trim());
-
-    if (parts.length >= 2) {
-      const rawName = parts[0].replace(/^[-•*]\s*/, '').trim();
-      const unitPrice = parseFloat(parts[1].replace(/[^0-9.]/g, '')) || 10.0;
-      const retailPrice =
-        parts[2] && parseFloat(parts[2].replace(/[^0-9.]/g, ''))
-          ? parseFloat(parts[2].replace(/[^0-9.]/g, ''))
-          : Number((unitPrice * 1.45).toFixed(2));
-      const caseSizeNum =
-        parts[3] && parseInt(parts[3].replace(/[^0-9]/g, ''), 10)
-          ? parseInt(parts[3].replace(/[^0-9]/g, ''), 10)
-          : 1;
-      const unitLabel =
-        parts[4] ||
-        (caseSizeNum > 1 ? `1 share (1/${caseSizeNum} case)` : '1 wholesale unit');
-
-      const { emoji, category } = inferEmojiAndCategory(rawName);
-      const isCaseSplit = caseSizeNum > 1;
-
-      parsedItems.push({
-        id: `item_import_${nowTs}_${idx}`,
-        name: rawName,
-        category,
-        emoji,
-        mode: isCaseSplit ? 'case_split' : 'individual',
-        unitLabel,
-        unitPrice,
-        retailPrice,
-        caseSize: isCaseSplit ? caseSizeNum : undefined,
-        claims:
-          idx === 0
-            ? [
-                {
-                  userId: creator.id,
-                  userName: creator.name,
-                  avatarColor: creator.avatarColor,
-                  quantity: 1,
-                },
-              ]
-            : [],
-      });
-      return;
-    }
-
-    // Fallback free-text parser: e.g. "Organic Strawberries $13.50"
-    const priceMatches = line.match(/\$?\d+(?:\.\d{1,2})?/g);
-    const unitPrice =
-      priceMatches && priceMatches[0]
-        ? parseFloat(priceMatches[0].replace('$', ''))
-        : 12.0;
-    const retailPrice =
-      priceMatches && priceMatches[1]
-        ? parseFloat(priceMatches[1].replace('$', ''))
-        : Number((unitPrice * 1.45).toFixed(2));
-
-    const cleanName = line
-      .replace(/\$?\d+(?:\.\d{1,2})?/g, '')
-      .replace(/[-|•*]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    const { emoji, category } = inferEmojiAndCategory(cleanName || line);
-
-    parsedItems.push({
-      id: `item_import_${nowTs}_${idx}`,
-      name: cleanName || `Wholesale Item #${idx + 1}`,
-      category,
-      emoji,
-      mode: 'individual',
-      unitLabel: '1 wholesale unit',
-      unitPrice,
-      retailPrice,
-      claims: [],
-    });
-  });
-
-  return parsedItems;
+function lines(raw: string) {
+  if (raw.length > 100_000) throw new Error('Paste at most 100,000 characters.');
+  const rows = raw.split(/\r?\n/).map((text, i) => ({ text: text.trim(), line: i + 1 })).filter((r) => r.text && !/^(#|\/\/)/.test(r.text));
+  if (rows.length > 200) throw new Error('Paste at most 200 non-comment lines.');
+  return rows;
 }
-
-/**
- * Track #2B: Matches pasted wholesale register receipt lines against the active pool's
- * catalog items and extracts actual unit prices + extra tax/CRV/weight fees for Receipt True-Up.
- */
-export function parseReceiptTrueUpText(
-  rawText: string,
-  catalogItems: CatalogItem[]
-): {
-  matches: ParsedReceiptMatch[];
-  detectedTaxOrFee: number;
-} {
-  const lines = rawText
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-
-  const matches: ParsedReceiptMatch[] = [];
-  let detectedTaxOrFee = 0;
-
-  lines.forEach((line) => {
-    const lower = line.toLowerCase();
-    const priceMatches = line.match(/\$?\d+(?:\.\d{1,2})?/g);
-    const lastNumber =
-      priceMatches && priceMatches.length > 0
-        ? parseFloat(priceMatches[priceMatches.length - 1].replace('$', ''))
-        : null;
-
-    if (lastNumber === null || isNaN(lastNumber)) return;
-
-    if (
-      lower.includes('tax') ||
-      lower.includes('crv') ||
-      lower.includes('ice') ||
-      lower.includes('bag fee') ||
-      lower.includes('surcharge')
-    ) {
-      detectedTaxOrFee += lastNumber;
-      return;
-    }
-
-    // Match against catalog item keywords
-    for (const item of catalogItems) {
-      const words = item.name
-        .toLowerCase()
-        .replace(/[^a-z0-9 ]/g, '')
-        .split(' ')
-        .filter((w) => w.length >= 4);
-
-      const isMatch = words.some((w) => lower.includes(w));
-      if (isMatch && !matches.some((m) => m.itemId === item.id)) {
-        matches.push({
-          itemId: item.id,
-          itemName: item.name,
-          emoji: item.emoji,
-          previousPrice: item.unitPrice,
-          newReceiptPrice: lastNumber,
-        });
-        break;
+export function parseBulkCatalog(raw: string): { items: CatalogItem[]; errors: ParseIssue[] } {
+  const items: CatalogItem[] = []; const errors: ParseIssue[] = [];
+  let rows: ReturnType<typeof lines>;
+  try { rows = lines(raw); } catch (error) { return { items, errors: [{ line: 0, message: String(error) }] }; }
+  for (const row of rows) {
+    try {
+      if (/^name\s*[|,]\s*(?:unit|wholesale)/i.test(row.text)) continue;
+      let name: string, unitPrice: number, retailPrice: number, caseSize = 1, unitLabel = '1 wholesale unit';
+      if (row.text.includes('|') || row.text.includes(',')) {
+        const parts = row.text.split(row.text.includes('|') ? '|' : ',').map((part) => part.trim());
+        if (parts.length < 2 || parts.length > 5 || parts.some((p) => p.includes('"'))) throw new Error('Use 2–5 plain columns: Name | Unit $ | Retail $ | Shares/case | Unit label.');
+        name = parts[0]; unitPrice = decimal(parts[1], 'Unit price');
+        retailPrice = parts[2] ? decimal(parts[2], 'Retail price') : unitPrice;
+        if (parts[3]) {
+          if (!/^\d+$/.test(parts[3])) throw new Error('Shares per case must be a whole number.');
+          caseSize = requireNumber(Number(parts[3]), 'Shares per case', 1, true, 1000);
+        }
+        unitLabel = parts[4] || (caseSize > 1 ? `1 share (1/${caseSize} case)` : unitLabel);
+      } else {
+        const match = row.text.match(/^(.+?)\s+\$(\d+(?:\.\d{1,2})?)$/);
+        if (!match || /\$/.test(match[1])) throw new Error('Use explicit columns, or Item Name $unit-price. Prices are never guessed from package sizes.');
+        name = match[1].trim(); unitPrice = decimal(match[2], 'Unit price'); retailPrice = unitPrice;
       }
-    }
-  });
-
-  return {
-    matches,
-    detectedTaxOrFee: Number(detectedTaxOrFee.toFixed(2)),
-  };
+      if (!name || name.length > 200) throw new Error('Item name must contain 1–200 characters.');
+      const category = categoryRules.find(([pattern]) => pattern.test(name));
+      items.push({ id: `preview_${row.line}`, name, emoji: category?.[1] ?? '📦', category: category?.[2] ?? 'Wholesale Bulk', mode: caseSize > 1 ? 'case_split' : 'individual', unitLabel, unitPrice, retailPrice, caseSize: caseSize > 1 ? caseSize : undefined, claims: [] });
+    } catch (error) { errors.push({ line: row.line, message: error instanceof Error ? error.message : String(error) }); }
+  }
+  if (items.length > 200) errors.push({ line: 0, message: 'Import at most 200 items at a time.' });
+  return { items, errors };
 }
-
+// Retained compatibility API; callers requiring diagnostics use parseBulkCatalog.
+export function parseBulkCatalogText(raw: string, _creator?: Participant): CatalogItem[] {
+  const result = parseBulkCatalog(raw);
+  if (result.errors.length) throw new Error(result.errors.map((e) => `Line ${e.line}: ${e.message}`).join('\n'));
+  return result.items;
+}
+const genericWords = new Set(['organic', 'wholesale', 'bulk', 'case', 'split', 'share', 'pack', 'unit', 'bag', 'box', 'local', 'fresh', 'price', 'drop']);
+function tokens(text: string): string[] {
+  return text.toLowerCase().replace(/\([^)]*\)/g, ' ').match(/[a-z]+/g)?.filter((word) => word.length >= 3 && !genericWords.has(word)) ?? [];
+}
+export function parseReceiptTrueUpText(raw: string, catalog: CatalogItem[]): {
+  matches: ParsedReceiptMatch[]; detectedTaxOrFee: number; errors: ParseIssue[];
+} {
+  const matches: ParsedReceiptMatch[] = []; const errors: ParseIssue[] = []; let feeCents = 0;
+  let rows: ReturnType<typeof lines>;
+  try { rows = lines(raw); } catch (error) { return { matches, detectedTaxOrFee: 0, errors: [{ line: 0, message: String(error) }] }; }
+  for (const row of rows) {
+    try {
+      if (/^(?:subtotal|grand total|total|date|receipt|valley harvest wholesale register receipt)\b/i.test(row.text)) continue;
+      const fee = row.text.match(/^(?:sales tax|tax|crv|ice fee|bag fee|surcharge|cold pack ice & box crv tax)\s*[:=]?\s+\$?(\d+(?:\.\d{1,2})?)$/i);
+      if (fee) { feeCents += Math.round(decimal(fee[1], 'Receipt fee', 0) * 100); continue; }
+      const match = row.text.match(/^(.+?)\s+@\s*\$?(\d+(?:\.\d{1,2})?)(?:\s*\/unit)?$/i);
+      if (!match) throw new Error('Use Item Name @ $unit-price /unit; line totals and quantities cannot be safely inferred. Use Tax $amount for fees.');
+      const words = new Set(tokens(match[1]));
+      if (!words.size) throw new Error('Item name is too generic to match.');
+      const candidates = catalog.filter((item) => {
+        const itemWords = new Set(tokens(item.name));
+        return [...words].every((word) => itemWords.has(word));
+      });
+      if (candidates.length !== 1) throw new Error(candidates.length ? 'Ambiguous item name: use its full catalog name.' : 'No catalog item matched this line.');
+      const item = candidates[0];
+      if (matches.some((m) => m.itemId === item.id)) throw new Error('Duplicate receipt entry for this item.');
+      matches.push({ itemId: item.id, itemName: item.name, emoji: item.emoji, previousPrice: item.actualUnitPrice ?? item.unitPrice, newReceiptPrice: decimal(match[2], 'Actual unit price') });
+    } catch (error) { errors.push({ line: row.line, message: error instanceof Error ? error.message : String(error) }); }
+  }
+  if (feeCents > 100_000_000) errors.push({ line: 0, message: 'Receipt fees exceed the supported amount.' });
+  return { matches, detectedTaxOrFee: feeCents / 100, errors };
+}
 export const SAMPLE_BULK_CATALOG_TEXT = `Organic Honeycrisp Apples (40 lb Case) | 11.00 | 17.99 | 5 | 8 lb bag (1/5 case)
 Wildflower Raw Local Honey (4-Jar Case) | 13.50 | 21.99 | 4 | 32 oz glass jar
 Pasture-Raised Greek Yogurt (6-Tub Case) | 4.75 | 7.99 | 6 | 32 oz tub
-Artisanal Sourdough Batard ( Bakery Flat ) | 5.50 | 9.50 | 1 | 1 fresh loaf`;
-
-export const SAMPLE_RECEIPT_OCR_TEXT = `VALLEY HARVEST WHOLESALE REGISTER RECEIPT
-Organic Hass Avocados (Dock Price Drop) $10.25
-Barista Organic Oat Milk (Unit Share) $3.00
-Pasture-Raised Heirloom Eggs $11.50
-Cold-Pressed California Olive Oil $17.50
-Cold Pack Ice & Box CRV Tax $4.50`;
+Artisanal Sourdough Batard | 5.50 | 9.50 | 1 | 1 fresh loaf`;
+export const SAMPLE_RECEIPT_OCR_TEXT = `# Enter actual per-share prices, not case totals.
+Organic Hass Avocados @ $10.25 /unit
+Barista Organic Oat Milk @ $3.00 /unit
+Pasture-Raised Heirloom Eggs @ $11.50 /unit
+Cold-Pressed California Olive Oil @ $17.50 /unit
+Tax $4.50`;

@@ -54,7 +54,7 @@ export interface PorchDropCheckIn {
   updatedAt?: string;
 }
 
-export type PaidStatus = 'pending' | 'stripe_authorized' | 'paid';
+export type PaidStatus = 'pending' | 'demo_authorized' | 'demo_paid' | 'paid';
 
 export interface Participant {
   id: string;
@@ -65,9 +65,10 @@ export interface Participant {
   isHost?: boolean;
   verifiedAuth?: boolean;
   paidStatus: PaidStatus;
-  stripeHoldId?: string;
-  stripeAuthorizedAmount?: number;
+  demoHoldId?: string;
+  demoAuthorizedAmount?: number;
   pickedUp?: boolean;
+  settledAmount?: number;
 }
 
 export type PoolStatus = 'open' | 'minimum_met' | 'locked';
@@ -192,13 +193,16 @@ export interface UserCostBreakdown {
   totalEstimatedSavings: number;
   totalDue: number;
   paidStatus: PaidStatus;
-  stripeHoldId?: string;
+  demoHoldId?: string;
   pickedUp?: boolean;
   lineItems: {
     itemId: string;
     itemName: string;
     emoji: string;
     quantity: number;
+    committedQuantity: number;
+    pendingQuantity: number;
+    pendingSubtotal: number;
     quotedUnitPrice: number;
     effectiveUnitPrice: number;
     subtotal: number;
