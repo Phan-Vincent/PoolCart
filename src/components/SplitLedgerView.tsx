@@ -16,6 +16,8 @@ interface Props {
   isCurrentUserHost: boolean;
   onTogglePaidStatus: (userId: string) => void;
   onAuthorizeDemoHold: (userId: string, amount: number) => void;
+  /** Local demo builds only: show simulated card-hold controls. */
+  demoPaymentsEnabled?: boolean;
 }
 
 export const SplitLedgerView: React.FC<Props> = ({
@@ -24,6 +26,7 @@ export const SplitLedgerView: React.FC<Props> = ({
   isCurrentUserHost,
   onTogglePaidStatus,
   onAuthorizeDemoHold,
+  demoPaymentsEnabled = true,
 }) => {
   const breakdowns = getParticipantBreakdowns(pool);
   const venmoHandle = pool.hostVenmoHandle?.trim().replace(/^@/, '') || '';
@@ -270,7 +273,7 @@ export const SplitLedgerView: React.FC<Props> = ({
                 {/* Track #3: Dual Settlement Buttons (Stripe Pre-Auth Hold + 1-Tap Venmo) */}
                 {isMe && b.paidStatus !== 'paid' && b.paidStatus !== 'demo_paid' && b.totalDue > 0 && (
                   <View style={styles.paymentButtonsWrap}>
-                    {b.paidStatus !== 'demo_authorized' ? (
+                    {!demoPaymentsEnabled ? null : b.paidStatus !== 'demo_authorized' ? (
                       <TouchableOpacity
                         style={styles.stripeHoldButton}
                         onPress={() =>

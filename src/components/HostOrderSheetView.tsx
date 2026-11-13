@@ -37,6 +37,8 @@ interface Props {
   onUpdatePorchCheckIn: (checkIn: PorchDropCheckIn) => void;
   onTogglePaidStatus: (userId: string) => void;
   onTogglePickedUp: (userId: string) => void;
+  /** Local demo builds only: demo profile switching and simulated card holds. */
+  localDemo?: boolean;
 }
 
 export const HostOrderSheetView: React.FC<Props> = ({
@@ -55,6 +57,7 @@ export const HostOrderSheetView: React.FC<Props> = ({
   onUpdatePorchCheckIn,
   onTogglePaidStatus,
   onTogglePickedUp,
+  localDemo = true,
 }) => {
   const [taxFeeInput, setTaxFeeInput] = useState(
     pool.trueUp?.taxOrBagFee !== undefined ? String(pool.trueUp.taxOrBagFee) : '0'
@@ -160,24 +163,28 @@ export const HostOrderSheetView: React.FC<Props> = ({
         <View style={styles.roleGuardBanner}>
           <View style={{ flex: 1, paddingRight: 10 }}>
             <Text style={styles.roleGuardTitle}>
-              🔒 Neighbor view — local demo permissions
+              {localDemo
+                ? '🔒 Neighbor view — local demo permissions'
+                : '🔒 Neighbor view'}
             </Text>
             <Text style={styles.roleGuardSub}>
               You are viewing as{' '}
               <Text style={{ fontWeight: '800' }}>{activeUser.name}</Text>. Only
-              the selected demo Pool Host (
+              the {localDemo ? 'selected demo ' : ''}pool host (
               <Text style={{ fontWeight: '800' }}>{pool.hostName}</Text>) can
-              lock the pool, reconcile receipts, or capture payment holds.
+              lock the pool, reconcile receipts, or confirm payments.
             </Text>
           </View>
-          <TouchableOpacity
-            style={styles.switchHostBtn}
-            onPress={onSwitchToHostProfile}
-          >
-            <Text style={styles.switchHostBtnText}>
-              Switch demo profile: {pool.hostName.split(' ')[0]}
-            </Text>
-          </TouchableOpacity>
+          {localDemo && (
+            <TouchableOpacity
+              style={styles.switchHostBtn}
+              onPress={onSwitchToHostProfile}
+            >
+              <Text style={styles.switchHostBtnText}>
+                Switch demo profile: {pool.hostName.split(' ')[0]}
+              </Text>
+            </TouchableOpacity>
+          )}
         </View>
       )}
 
@@ -248,7 +255,8 @@ export const HostOrderSheetView: React.FC<Props> = ({
         </View>
       </View>
 
-      {/* Track #3: Stripe Pre-Authorization Hold Batch Capture Card */}
+      {/* Local demo only: simulated card-hold batch capture */}
+      {localDemo && (
       <View style={styles.stripeCaptureCard}>
         <View style={styles.controlHeaderRow}>
           <View style={{ flex: 1, paddingRight: 10 }}>
@@ -286,6 +294,7 @@ export const HostOrderSheetView: React.FC<Props> = ({
           </TouchableOpacity>
         </View>
       </View>
+      )}
 
       {/* Partial Bulk Cases Resolution Alert */}
       {manifest.partialCaseItems.length > 0 && (

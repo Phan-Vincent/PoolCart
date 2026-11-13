@@ -31,6 +31,7 @@ module.exports = function registerComponentChecks(test, {assert, pool, finalized
   const {SupabaseSetupCard}=require('../src/components/SupabaseSetupCard.tsx');
   const {CreatePoolModal, buildCreatedPoolFromForm, JoinByCodeModal}=require('../src/components/ActionModals.tsx');
   const {SUPPLIER_TEMPLATES}=require('../src/data/mockPools.ts');
+  const {AuthScreen}=require('../src/components/AuthScreen.tsx');
   const noop=()=>{};
   test('Ledger renders payable/pending quantities and restricts payment actions to self',()=>{
     const html=render(SplitLedgerView,{pool:pool(),currentUserId:member.id,isCurrentUserHost:false,onTogglePaidStatus:noop,onAuthorizeDemoHold:noop});
@@ -48,8 +49,8 @@ module.exports = function registerComponentChecks(test, {assert, pool, finalized
   test('Host view labels simulated capture honestly and prevents capture before lock',()=>{
     const html=render(HostOrderSheetView,{pool:pool(),activeUser:host,isCurrentUserHost:true,onSwitchToHostProfile:noop,onToggleLockPool:noop,onRerunWeeklyPool:noop,onHostCoverRemainder:noop,onTrimPartialCase:noop,onUpdateItemActualPrice:noop,onUpdateReceiptTrueUp:noop,onOpenBulkImportModal:noop,onCaptureAllDemoHolds:noop,onUpdatePorchCheckIn:noop,onTogglePaidStatus:noop,onTogglePickedUp:noop});assert(html.includes('NO FUNDS MOVE'));assert(buttons.find(b=>b.label.includes('Simulate capture')).disabled);
   });
-  test('Invite flyer shares a real app-link string and explicitly discloses missing QR encoding',async()=>{
-    const html=render(PilotFlyerModal,{visible:true,pool:pool(),onClose:noop});assert(html.includes('QR encoding is not connected'));assert(!html.includes('poolcart.vercel.app'));await buttons.find(b=>b.label.includes('Share invite')).onPress();assert(shared[0].message.includes('poolcart://join/TEST-1'));
+  test('Invite flyer shares a real app-link string and shows no placeholder QR art',async()=>{
+    const html=render(PilotFlyerModal,{visible:true,pool:pool(),onClose:noop});assert(!html.includes('QR'));assert(html.includes('TEST-1'));assert(!html.includes('poolcart.vercel.app'));await buttons.find(b=>b.label.includes('Share invite')).onPress();assert(shared[0].message.includes('poolcart://join/TEST-1'));
   });
   test('Wallet and cloud setup render honest local/cloud state without fake OTP buttons and disable demo switching in cloud mode',()=>{
     const html=render(WalletHistoryView,{pools:[pool()],activePool:pool(),activeUser:member,pastReceipts:[],onReclaimReceiptItems:noop});assert(html.includes('No authenticated sign-in'));assert(!buttons.some(b=>b.label.includes('OTP')));
@@ -122,5 +123,24 @@ module.exports = function registerComponentChecks(test, {assert, pool, finalized
     // Simulate typing code via build helper and invoking join callback directly
     const res = await buttons.find(b=>b.label.includes('Join Pool'));
     assert(res);
+  });
+  test('Store builds hide simulated card holds and demo profile switching outside local mode',()=>{
+    const p=finalized();p.hostVenmoHandle='Demo-Host';
+    render(SplitLedgerView,{pool:p,currentUserId:member.id,isCurrentUserHost:false,onTogglePaidStatus:noop,onAuthorizeDemoHold:noop,demoPaymentsEnabled:false});
+    assert(!buttons.some(b=>b.label.includes('Simulate card hold')));assert(buttons.some(b=>b.label.includes('Open Venmo')));
+    const html=render(HostOrderSheetView,{pool:pool(),activeUser:member,isCurrentUserHost:false,localDemo:false,onSwitchToHostProfile:noop,onToggleLockPool:noop,onRerunWeeklyPool:noop,onHostCoverRemainder:noop,onTrimPartialCase:noop,onUpdateItemActualPrice:noop,onUpdateReceiptTrueUp:noop,onOpenBulkImportModal:noop,onCaptureAllDemoHolds:noop,onUpdatePorchCheckIn:noop,onTogglePaidStatus:noop,onTogglePickedUp:noop});
+    assert(!html.includes('NO FUNDS MOVE'));assert(!html.toLowerCase().includes('demo'));assert(!buttons.some(b=>b.label.includes('Simulate capture')||b.label.includes('Switch demo profile')));
+  });
+  test('Sign-in screen requires credentials and links the privacy policy',async()=>{
+    const html=render(AuthScreen,{onSignIn:async()=>{},onSignUp:async()=>{},privacyPolicyUrl:'https://example.test/privacy',notice:'Sign in to join pool ABC-1.'});
+    assert(html.includes('ABC-1'));
+    const submit=buttons.filter(b=>b.label==='Sign in').pop();assert(submit&&submit.disabled,'submit disabled until email and password entered');
+    await buttons.find(b=>b.label.includes('Privacy Policy')).onPress();assert.deepEqual(opened,['https://example.test/privacy']);
+  });
+  test('Signed-in account settings offer a confirmed, permanent account deletion',()=>{
+    const signedIn={...member,verifiedAuth:true,email:'n@example.test'};
+    render(SupabaseSetupCard,{activeUser:signedIn,onSelectUser:noop,syncStatus:{mode:'supabase_live',label:'Connected',lastSyncedAt:'10:00 AM',authenticatedUser:signedIn},onConfigSaved:async()=>{},onCloudSignOut:async()=>{},onDeleteAccount:async()=>{},onSimulateNeighborAction:noop,onResetDemo:noop});
+    assert(buttons.some(b=>b.label.includes('Delete account')));
+    assert(!buttons.some(b=>b.label.includes('Delete permanently')),'destructive action needs a second confirmation step');
   });
 };

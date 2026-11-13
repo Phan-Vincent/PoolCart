@@ -73,6 +73,11 @@ import {
 import { PilotFlyerModal } from './src/components/PilotFlyerModal';
 import { BulkImportModal } from './src/components/BulkImportModal';
 import { SupabaseSetupCard } from './src/components/SupabaseSetupCard';
+import { AuthScreen } from './src/components/AuthScreen';
+import { getPrivacyPolicyUrl, isHostedBuild } from './src/config/appMode';
+
+// Store builds bundle the production backend and hide local demo features.
+const HOSTED_BUILD = isHostedBuild();
 
 type ActiveTab =
   | 'catalog'
@@ -86,8 +91,10 @@ type RadiusFilter = 'all' | 'under_05mi' | 'under_2mi';
 
 export default function App() {
   const [pools, setPoolState] = useState<GroupBuyPool[]>(() =>
-    normalizePools(INITIAL_POOLS)
+    HOSTED_BUILD ? [] : normalizePools(INITIAL_POOLS)
   );
+  // Invite link opened before sign-in; joined right after the user signs in.
+  const pendingInviteCodeRef = useRef<string | null>(null);
   const poolsRef = useRef(pools);
   const [ready, setReady] = useState(false);
   const [storageError, setStorageError] = useState('');
@@ -187,7 +194,7 @@ export default function App() {
 
       setCloudAuthUser(authenticatedUser ?? null);
 
-      if (cloudState === 'empty_cloud') {
+      if (cloudState === 'empty_cloud' || (HOSTED_BUILD && !authenticatedUser)) {
         poolsRef.current = [];
         setPoolState([]);
       } else if (loaded && loaded.length > 0) {
@@ -244,7 +251,9 @@ export default function App() {
         });
       }
 
-      if (initialDeepLinkCode) {
+      if (initialDeepLinkCode && HOSTED_BUILD && !authenticatedUser) {
+        pendingInviteCodeRef.current = initialDeepLinkCode;
+      } else if (initialDeepLinkCode) {
         const matched = loaded.find(
           (p) =>
             p.joinCode.toUpperCase() === initialDeepLinkCode.toUpperCase() ||
@@ -491,7 +500,13 @@ export default function App() {
       neighborhood
     );
     setCloudAuthUser(user);
-    await refreshPools();
+    await refreshPoolsAfterSignIn();
+  };
+
+  const refreshPoolsAfterSignIn = async () => {
+    const code = pendingInviteCodeRef.current;
+    pendingInviteCodeRef.current = null;
+    await refreshPools(undefined, code);
   };
 
   const handleCloudSignUp = async (
@@ -515,13 +530,25 @@ export default function App() {
       return;
     }
     setCloudAuthUser(user);
-    await refreshPools();
+    await refreshPoolsAfterSignIn();
   };
 
   const handleCloudSignOut = async () => {
     await PoolRepository.signOutCloud();
     setCloudAuthUser(null);
     await refreshPools();
+  };
+
+  const handleDeleteAccount = async () => {
+    await PoolRepository.deleteCloudAccount();
+    setCloudAuthUser(null);
+    poolsRef.current = [];
+    setPoolState([]);
+    await refreshPools();
+    Alert.alert(
+      'Account deleted',
+      'Your PoolCart account and its data have been permanently deleted.'
+    );
   };
 
   const handleFlushPendingEdits = async () => {
@@ -907,6 +934,21 @@ export default function App() {
     );
   }
 
+  if (HOSTED_BUILD && !cloudAuthUser) {
+    return (
+      <AuthScreen
+        onSignIn={(email, password) => handleCloudSignIn(email, password, '', '')}
+        onSignUp={handleCloudSignUp}
+        privacyPolicyUrl={getPrivacyPolicyUrl()}
+        notice={
+          pendingInviteCodeRef.current
+            ? `Sign in or create an account to join pool ${pendingInviteCodeRef.current}.`
+            : undefined
+        }
+      />
+    );
+  }
+
   // Empty cloud state when connected to Supabase with 0 joined pools
   if (!activePool) {
     return (
@@ -914,7 +956,9 @@ export default function App() {
         <SafeAreaView style={styles.safeArea}>
           <StatusBar barStyle="dark-content" />
           <View style={styles.header}>
-            <Text style={styles.brandTitle}>🥬 PoolCart Cloud</Text>
+            <Text style={styles.brandTitle}>
+              {HOSTED_BUILD ? '🥬 PoolCart' : '🥬 PoolCart Cloud'}
+            </Text>
             <View style={styles.headerActions}>
               <TouchableOpacity
                 style={styles.codeJoinButton}
@@ -948,7 +992,9 @@ export default function App() {
                 No Joined Cloud Pools Yet
               </Text>
               <Text style={{ fontSize: 12, color: '#64748B', marginTop: 6 }}>
-                Sample demo fixtures are never uploaded automatically to your cloud database. Enter a neighbor invite code or host a new pool to begin.
+                {HOSTED_BUILD
+                  ? 'Enter an invite code from a neighbor, or host a new pool for your block.'
+                  : 'Sample demo fixtures are never uploaded automatically to your cloud database. Enter a neighbor invite code or host a new pool to begin.'}
               </Text>
             </View>
             <SupabaseSetupCard
@@ -959,6 +1005,7 @@ export default function App() {
               onCloudSignIn={handleCloudSignIn}
               onCloudSignUp={handleCloudSignUp}
               onCloudSignOut={handleCloudSignOut}
+              onDeleteAccount={handleDeleteAccount}
               onFlushPendingEdits={handleFlushPendingEdits}
               onSimulateNeighborAction={handleSimulateNeighborAction}
               onResetDemo={handleResetDemo}
@@ -1514,6 +1561,7 @@ export default function App() {
               isCurrentUserHost={isCurrentUserHost}
               onTogglePaidStatus={handleTogglePaidStatus}
               onAuthorizeDemoHold={handleAuthorizeDemoHold}
+              demoPaymentsEnabled={!isCloudMode}
             />
           )}
 
@@ -1546,6 +1594,7 @@ export default function App() {
               onUpdateReceiptTrueUp={handleUpdateReceiptTrueUp}
               onOpenBulkImportModal={handleOpenBulkImportModal}
               onCaptureAllDemoHolds={handleCaptureAllDemoHolds}
+              localDemo={!isCloudMode}
               onUpdatePorchCheckIn={handleUpdatePorchCheckIn}
               onTogglePaidStatus={handleTogglePaidStatus}
               onTogglePickedUp={handleTogglePickedUp}
@@ -1574,6 +1623,7 @@ export default function App() {
               onCloudSignIn={handleCloudSignIn}
               onCloudSignUp={handleCloudSignUp}
               onCloudSignOut={handleCloudSignOut}
+              onDeleteAccount={handleDeleteAccount}
               onFlushPendingEdits={handleFlushPendingEdits}
               onSimulateNeighborAction={handleSimulateNeighborAction}
               onResetDemo={handleResetDemo}

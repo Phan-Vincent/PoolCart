@@ -9,12 +9,14 @@
     "web": "expo start --web",
     "build:web": "expo export -p web",
     "typecheck": "tsc --noEmit",
-    "test": "node tests/run.cjs"
+    "test": "node tests/run.cjs",
+    "test:sql": "node tests/sql.mjs"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
     "@supabase/supabase-js": "^2.49.1",
-    "expo": "^57.0.32",
+    "expo": "~57.0.33",
+    "expo-splash-screen": "~57.0.11",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",
     "react-dom": "19.2.3",
@@ -22,6 +24,7 @@
     "react-native-web": "^0.21.2"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.2.17",
     "@types/react": "~19.2.0",
     "typescript": "~6.0.3"
   },

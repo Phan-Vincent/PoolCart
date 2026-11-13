@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
+  Linking,
 } from 'react-native';
 import { newId } from '../utils/poolActions';
 import { Participant } from '../types/groupBuy';
@@ -15,6 +16,7 @@ import {
   SupabaseConfig,
   SyncStatusInfo,
 } from '../services/repository';
+import { getPrivacyPolicyUrl, isHostedBuild } from '../config/appMode';
 
 interface Props {
   activeUser: Participant;
@@ -34,6 +36,7 @@ interface Props {
     neighborhood: string
   ) => Promise<void>;
   onCloudSignOut?: () => Promise<void>;
+  onDeleteAccount?: () => Promise<void>;
   onFlushPendingEdits?: () => Promise<void>;
   onSimulateNeighborAction: () => void;
   onResetDemo: () => void;
@@ -47,6 +50,7 @@ export const SupabaseSetupCard: React.FC<Props> = ({
   onCloudSignIn,
   onCloudSignUp,
   onCloudSignOut,
+  onDeleteAccount,
   onFlushPendingEdits,
   onSimulateNeighborAction,
   onResetDemo,
@@ -63,6 +67,25 @@ export const SupabaseSetupCard: React.FC<Props> = ({
   const [authDisplayName, setAuthDisplayName] = useState('');
   const [authNeighborhood, setAuthNeighborhood] = useState('Victoria Gardens');
   const [authFormError, setAuthFormError] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+  const [isDeleting, setIsDeleting] = useState(false);
+  const hosted = isHostedBuild();
+  const privacyUrl = getPrivacyPolicyUrl();
+
+  const handleDeleteAccount = async () => {
+    if (!onDeleteAccount) return;
+    setDeleteError('');
+    setIsDeleting(true);
+    try {
+      await onDeleteAccount();
+      setConfirmDelete(false);
+    } catch (err: any) {
+      setDeleteError(err?.message || String(err));
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   const isCloudEnabled =
     existingConfig.enabled || syncStatus.mode !== 'local';
@@ -222,6 +245,7 @@ export const SupabaseSetupCard: React.FC<Props> = ({
       </View>
 
       {/* Multi-Neighbor Identity Switcher (Strict Local Demo Only) */}
+      {!hosted && (
       <View style={styles.card}>
         <Text style={styles.cardTitle}>
           👤 Local Demo Neighbor Identity (Local Mode Only)
@@ -310,12 +334,14 @@ export const SupabaseSetupCard: React.FC<Props> = ({
           </>
         )}
       </View>
+      )}
 
       {/* Supabase Cloud Connection & Authenticated Session Setup */}
       <View style={styles.card}>
         <Text style={styles.cardTitle}>
-          ☁️ Authenticated Supabase Cloud Sync
+          {hosted ? '👤 Your PoolCart Account' : '☁️ Authenticated Supabase Cloud Sync'}
         </Text>
+        {!hosted && (<>
         <Text style={styles.cardSub}>
           1. Run <Text style={styles.codeInline}>supabase/schema.sql</Text> in your Supabase SQL Editor to install member-scoped RLS and transactional RPCs.{'\n'}
           2. Enter your Project URL and Anon Key below, then sign in with an authenticated Supabase user account. Sample demo fixtures are never uploaded automatically.
@@ -373,13 +399,16 @@ export const SupabaseSetupCard: React.FC<Props> = ({
             )}
           </TouchableOpacity>
         </View>
+        </>)}
 
         {/* Cloud Auth Session Controls when Cloud Mode is Enabled */}
         {isCloudEnabled && (
-          <View style={styles.authBox}>
-            <Text style={styles.cardTitle}>
-              🔐 Cloud Account Session (Server-Verified Identity)
-            </Text>
+          <View style={hosted ? undefined : styles.authBox}>
+            {!hosted && (
+              <Text style={styles.cardTitle}>
+                🔐 Cloud Account Session (Server-Verified Identity)
+              </Text>
+            )}
             {syncStatus.authenticatedUser ? (
               <View>
                 <Text style={styles.cardSub}>
@@ -394,7 +423,62 @@ export const SupabaseSetupCard: React.FC<Props> = ({
                     style={styles.disconnectBtn}
                     onPress={onCloudSignOut}
                   >
-                    <Text style={styles.disconnectBtnText}>Sign Out of Cloud Session</Text>
+                    <Text style={styles.disconnectBtnText}>
+                      {hosted ? 'Sign Out' : 'Sign Out of Cloud Session'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                {onDeleteAccount && (
+                  <View style={styles.deleteBox}>
+                    {!confirmDelete ? (
+                      <TouchableOpacity
+                        onPress={() => setConfirmDelete(true)}
+                        accessibilityRole="button"
+                      >
+                        <Text style={styles.deleteLink}>Delete account…</Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <View>
+                        <Text style={styles.deleteWarning}>
+                          This permanently deletes your account, profile, claims, and chat messages. Pools you host are deleted for every member. In locked pools you joined, your order lines stay for the host's records under “Deleted neighbor”. This cannot be undone.
+                        </Text>
+                        {!!deleteError && (
+                          <Text style={styles.errorText}>{deleteError}</Text>
+                        )}
+                        <View style={styles.btnRow}>
+                          <TouchableOpacity
+                            style={styles.deleteConfirmBtn}
+                            onPress={handleDeleteAccount}
+                            disabled={isDeleting}
+                            accessibilityRole="button"
+                          >
+                            {isDeleting ? (
+                              <ActivityIndicator color="#FFFFFF" size="small" />
+                            ) : (
+                              <Text style={styles.connectBtnText}>Delete permanently</Text>
+                            )}
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={styles.disconnectBtn}
+                            onPress={() => {
+                              setConfirmDelete(false);
+                              setDeleteError('');
+                            }}
+                            disabled={isDeleting}
+                          >
+                            <Text style={styles.disconnectBtnText}>Cancel</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    )}
+                  </View>
+                )}
+                {!!privacyUrl && (
+                  <TouchableOpacity
+                    onPress={() => Linking.openURL(privacyUrl).catch(() => undefined)}
+                    accessibilityRole="link"
+                  >
+                    <Text style={styles.privacyLink}>Privacy Policy</Text>
                   </TouchableOpacity>
                 )}
               </View>
@@ -500,6 +584,40 @@ export const SupabaseSetupCard: React.FC<Props> = ({
 };
 
 const styles = StyleSheet.create({
+  deleteBox: {
+    marginTop: 16,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+  },
+  deleteLink: {
+    color: '#B91C1C',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  deleteWarning: {
+    color: '#7F1D1D',
+    fontSize: 12,
+    lineHeight: 17,
+    backgroundColor: '#FEF2F2',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 8,
+  },
+  deleteConfirmBtn: {
+    flex: 1,
+    backgroundColor: '#B91C1C',
+    borderRadius: 10,
+    paddingVertical: 11,
+    alignItems: 'center',
+    marginRight: 8,
+  },
+  privacyLink: {
+    color: '#0F766E',
+    textDecorationLine: 'underline',
+    fontSize: 12,
+    marginTop: 14,
+  },
   container: {
     paddingBottom: 28,
   },

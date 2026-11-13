@@ -937,5 +937,62 @@ test('Network failure during cloud mutation preserves pending local edits and re
   PoolRepository.setTestSupabaseClient(null, { url: '', anonKey: '', enabled: false });
 });
 
+async function withHostedBuild(run){
+  const saved={url:process.env.EXPO_PUBLIC_SUPABASE_URL,key:process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY};
+  process.env.EXPO_PUBLIC_SUPABASE_URL='https://hosted.example.co';process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY='hosted-anon';
+  try{await run();}finally{
+    if(saved.url===undefined)delete process.env.EXPO_PUBLIC_SUPABASE_URL;else process.env.EXPO_PUBLIC_SUPABASE_URL=saved.url;
+    if(saved.key===undefined)delete process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;else process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY=saved.key;
+    PoolRepository.setTestSupabaseClient(null,{url:'',anonKey:'',enabled:false});
+    storage.delete('@poolcart_pools_v3');storage.delete('@poolcart_supabase_config_v1');
+  }
+}
+test('Hosted store build locks the bundled backend and never shows sample pools before sign-in',async()=>{
+  await withHostedBuild(async()=>{
+    storage.delete('@poolcart_pools_v3');
+    storage.set('@poolcart_supabase_config_v1',JSON.stringify({url:'https://other.example.co',anonKey:'other',enabled:false}));
+    let createdWith=null;
+    mockSupabaseFactory=(url,key)=>{createdWith=[url,key];return {auth:{getSession:async()=>({data:{session:null},error:null})}};};
+    const cfg=await PoolRepository.initConfig();
+    assert.deepEqual(cfg,{url:'https://hosted.example.co',anonKey:'hosted-anon',enabled:true});
+    await assert.rejects(()=>PoolRepository.saveSupabaseConfig({url:'https://evil.example.co',anonKey:'x',enabled:true}),/cannot change its backend/);
+    await assert.rejects(()=>PoolRepository.saveActiveUser(member),/disabled/);
+    const n=writes.length;
+    const res=await PoolRepository.loadPools();
+    assert.equal(res.cloudState,'auth_required');assert.deepEqual(res.pools,[]);
+    assert.deepEqual(createdWith,['https://hosted.example.co','hosted-anon']);
+    assert.deepEqual(await PoolRepository.loadLocalPools(),[]);
+    assert.equal(writes.filter((w,i)=>i>=n&&w.key==='@poolcart_pools_v3').length,0,'sample fixtures are never written in hosted builds');
+  });
+});
+test('Account deletion calls the server RPC, then clears the session and cached pools on this device',async()=>{
+  await withHostedBuild(async()=>{
+    const calls=[];let rpcError=null;
+    mockSupabaseFactory=()=>({
+      rpc:async(name)=>{calls.push(name);return {data:rpcError?null:{ok:true},error:rpcError};},
+      auth:{signOut:async(opts)=>{calls.push(['signOut',opts]);return {error:null};},getSession:async()=>({data:{session:null},error:null})},
+    });
+    await PoolRepository.initConfig();
+    await PoolRepository.saveLocalPools([pool()]);
+    await PoolRepository.queuePendingCloudEdit({id:'e1',poolId:'p',createdAt:'now',kind:'action',action:{type:'lock'}});
+    rpcError={message:'permission denied'};
+    await assert.rejects(()=>PoolRepository.deleteCloudAccount(),/permission denied/);
+    assert.equal((await PoolRepository.loadLocalPools()).length,1,'failed deletion leaves local data intact');
+    rpcError=null;calls.length=0;
+    await PoolRepository.deleteCloudAccount();
+    assert.deepEqual(calls,['delete_my_account',['signOut',{scope:'local'}]]);
+    assert.deepEqual(await PoolRepository.loadLocalPools(),[]);
+    assert.deepEqual(await PoolRepository.loadPendingCloudEdits(),[]);
+  });
+});
+test('SQL schema grants self-service account deletion to signed-in users only',()=>{
+  const sql=fs.readFileSync(path.join(root,'supabase/schema.sql'),'utf8');
+  const fn=sql.slice(sql.indexOf('create or replace function public.delete_my_account()'));
+  assert(fn.length>0&&fn.includes('security definer')&&fn.includes('public.require_authenticated_uid()'));
+  assert(fn.includes('delete from auth.users where id = v_uid::uuid'));
+  assert(sql.includes('revoke execute on function public.delete_my_account() from public, anon;'));
+  assert(sql.includes('grant execute on function public.delete_my_account() to authenticated;'));
+});
+
 require('./ui.cjs')(test, {assert, pool, finalized, host, member, initialPools: INITIAL_POOLS, ts});
 (async()=>{let failed=0;for(const t of tests){try{await t.run();console.log(`PASS ${t.name}`);}catch(error){failed++;console.error(`FAIL ${t.name}\n${error.stack}`);}}console.log(`\n${tests.length-failed}/${tests.length} test groups passed. No network, database, or running Expo app used.`);process.exitCode=failed?1:0;})();

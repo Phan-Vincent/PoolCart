@@ -1098,6 +1098,95 @@ begin
 end;
 $$;
 
+-- 8F. Self-Service Account Deletion (`delete_my_account`)
+-- Required by App Store Review Guideline 5.1.1(v) and Google Play's account
+-- deletion policy. Identity comes only from auth.uid().
+--   * Pools the caller hosts are deleted for every member (cascades to
+--     participants, items, claims, and messages).
+--   * In open pools the caller joined, their claims and membership are removed.
+--   * In locked pools (order already placed with the supplier) their order
+--     lines are kept for the host's accounting but de-identified.
+--   * Their chat messages, wishlist requests/pledges, profile, and auth user
+--     are deleted.
+create or replace function public.delete_my_account()
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_uid text := public.require_authenticated_uid();
+  v_hosted_deleted integer := 0;
+  v_pool_ids text[];
+begin
+  -- Pools the caller hosts
+  with hosted as (
+    delete from public.pools p
+    where public.is_pool_host_user(p.id, v_uid)
+    returning p.id
+  )
+  select count(*) into v_hosted_deleted from hosted;
+
+  select coalesce(array_agg(pool_id), array[]::text[]) into v_pool_ids
+  from public.pool_participants
+  where user_id = v_uid;
+
+  -- Chat messages everywhere
+  delete from public.pool_messages where user_id = v_uid;
+
+  -- Open pools: remove claims and membership
+  delete from public.item_claims c
+  using public.pools p
+  where c.pool_id = p.id and c.user_id = v_uid and p.status <> 'locked';
+
+  delete from public.pool_participants pp
+  using public.pools p
+  where pp.pool_id = p.id and pp.user_id = v_uid and p.status <> 'locked';
+
+  -- Locked pools: keep order lines for the host, de-identified
+  update public.item_claims c
+  set user_name = 'Deleted neighbor', avatar_color = '#94A3B8', updated_at = now()
+  from public.pools p
+  where c.pool_id = p.id and c.user_id = v_uid and p.status = 'locked';
+
+  update public.pool_participants pp
+  set user_name = 'Deleted neighbor',
+      neighborhood = '',
+      avatar_color = '#94A3B8',
+      updated_at = now()
+  from public.pools p
+  where pp.pool_id = p.id and pp.user_id = v_uid and p.status = 'locked';
+
+  -- Wishlist requests by the caller, and the caller's pledges on others
+  update public.pools p
+  set wishlist = coalesce((
+        select jsonb_agg(
+          jsonb_set(
+            w,
+            '{pledgedUserIds}',
+            coalesce((
+              select jsonb_agg(x)
+              from jsonb_array_elements(coalesce(w -> 'pledgedUserIds', '[]'::jsonb)) x
+              where x #>> '{}' is distinct from v_uid
+            ), '[]'::jsonb)
+          )
+        )
+        from jsonb_array_elements(p.wishlist) w
+        where w ->> 'requestedByUserId' is distinct from v_uid
+      ), '[]'::jsonb),
+      updated_at = now()
+  where p.id = any(v_pool_ids)
+    and jsonb_typeof(p.wishlist) = 'array';
+
+  delete from public.user_profiles where user_id = v_uid;
+
+  -- Finally remove the Supabase Auth user (sessions and identities cascade).
+  delete from auth.users where id = v_uid::uuid;
+
+  return jsonb_build_object('ok', true, 'hostedPoolsDeleted', v_hosted_deleted);
+end;
+$$;
+
 -- ============================================================================
 -- 9. Row-Level Security (Member-Scoped Read, RPC-Enforced Mutations)
 -- ============================================================================
@@ -1173,12 +1262,14 @@ revoke execute on function public.apply_pool_action_rpc(text, jsonb) from public
 revoke execute on function public.join_pool_by_invite(text, text, text, text) from public, anon;
 revoke execute on function public.create_pool_with_catalog(jsonb) from public, anon;
 revoke execute on function public.upsert_my_profile(text, text, text) from public, anon;
+revoke execute on function public.delete_my_account() from public, anon;
 
 grant execute on function public.claim_item_share(text, text, text, text, text, text, integer) to authenticated;
 grant execute on function public.apply_pool_action_rpc(text, jsonb) to authenticated;
 grant execute on function public.join_pool_by_invite(text, text, text, text) to authenticated;
 grant execute on function public.create_pool_with_catalog(jsonb) to authenticated;
 grant execute on function public.upsert_my_profile(text, text, text) to authenticated;
+grant execute on function public.delete_my_account() to authenticated;
 
 -- 10. Enable Supabase Realtime on all 5 pool tables
 do $$
