@@ -25,18 +25,13 @@ Still to do in the dashboard:
 - Remove the stray `EXPO_PUBLIC_TEST_PROBE` env var: `vercel env rm EXPO_PUBLIC_TEST_PROBE production` (the CLI needs you to confirm interactively).
 - In Supabase: **Authentication → URL Configuration → Site URL** = `https://poolcart.vercel.app`. This is what email confirmation links point to.
 
-## 3. EAS
+## 3. EAS — set up 2026-11-12
 
-```bash
-npm install -g eas-cli
-eas login
-eas init                      # writes owner + extra.eas.projectId into app.json
-eas env:create --environment production --name EXPO_PUBLIC_SUPABASE_URL --value https://xvfrmivhkrlpodwsadxc.supabase.co --visibility plaintext
-eas env:create --environment production --name EXPO_PUBLIC_SUPABASE_ANON_KEY --value <anon key> --visibility plaintext
-eas env:create --environment production --name EXPO_PUBLIC_PRIVACY_POLICY_URL --value https://poolcart.vercel.app/privacy --visibility plaintext
-```
+- Expo project **@phanvincent/poolcart** (ID `1dbf10f7-fe5b-4255-bd18-89b88358aab6`), owned by the personal `phanvincent` account. It can be transferred to `phanvincents-team` later from the Expo dashboard.
+- EAS environment variables, all plaintext: `EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY`, and `EXPO_PUBLIC_PRIVACY_POLICY_URL`, on both **production** and **preview**. **development** has none, so dev-client builds stay in local demo mode.
+- `eas config --profile production` resolves the variables, bundle ID / package `com.poolcart.grocerygroupbuy`, remote build numbers with `autoIncrement`, and environment `production`.
 
-Repeat the `env:create` lines with `--environment preview` for internal test builds.
+Builds (iOS asks for your Apple Developer login the first time and creates the certificates and provisioning profile; Android generates an upload keystore that EAS stores):
 
 ```bash
 eas build --platform ios --profile production
