@@ -95,12 +95,8 @@ export const PilotFlyerModal: React.FC<Props> = ({
                   {pool.supplierName} • {pool.supplierBadge}
                 </Text>
 
-                {/* QR Matrix Visual & Code Box */}
+                {/* Invite code & app link */}
                 <View style={styles.qrRow}>
-                  <View style={styles.qrBox}>
-                    <Text style={{ color: '#0F172A', fontWeight: '800', textAlign: 'center' }}>{'TYPE\nINVITE\nCODE'}</Text>
-                  </View>
-
                   <View style={styles.codeInfoCol}>
                     <Text style={styles.joinCodeLabel}>POOL INVITE CODE</Text>
                     <Text style={styles.joinCodeBig}>{pool.joinCode}</Text>
@@ -108,7 +104,7 @@ export const PilotFlyerModal: React.FC<Props> = ({
                       <Text style={styles.deepLinkText}>poolcart://join/{pool.joinCode}</Text>
                     </TouchableOpacity>
                     <Text style={styles.webLinkText}>
-                      Manual invite code • QR encoding is not connected
+                      Neighbors enter this code under “Join by Code”
                     </Text>
                   </View>
                 </View>
@@ -181,10 +177,10 @@ export const PilotFlyerModal: React.FC<Props> = ({
 
                 <View style={styles.stepCard}>
                   <Text style={styles.stepNum}>
-                    3️⃣ Demo Holds or Manual Settlement
+                    3️⃣ Settle Up with the Host
                   </Text>
                   <Text style={styles.stepBody}>
-                    Card holds and capture are local simulations with no funds moved. After receipt reconciliation, you may open Venmo separately; the host must verify payment before recording it.
+                    After the host reconciles the receipt, open Venmo to pay your exact share. PoolCart never handles money; the host confirms each payment once it arrives.
                   </Text>
                 </View>
 

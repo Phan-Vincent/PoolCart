@@ -40,10 +40,15 @@ Changing quantities, allocation, prices, or an amount due invalidates affected h
 
 No real payment processor (Stripe/Venmo API), third-party SMS/email OTP provider beyond standard Supabase Auth password/email session support, camera OCR, push notification transport, background reminder scheduler, or QR image encoder is connected. Review and test `supabase/schema.sql` in a staging Supabase environment before applying to any production project.
 
+## Store builds
+
+Builds with `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_ANON_KEY` set are store builds. They connect only to that backend and open on a sign-in screen. Sample pools, demo profiles, simulated card holds, and the editable backend form are all hidden. Signed-in users can delete their account in-app (`delete_my_account` RPC). Builds without those variables keep the local demo. See [docs/STORE-SUBMISSION.md](docs/STORE-SUBMISSION.md) for the release runbook, and `public/privacy.html` for the privacy policy, served at `/privacy` by the web export.
+
 ## Development and validation
 
 ```sh
 npm test
+npm run test:sql   # applies supabase/schema.sql to an in-process Postgres (PGlite) and tests account deletion
 npm run typecheck
 npm run build:web
 ```

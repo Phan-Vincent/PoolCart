@@ -9,6 +9,7 @@ import { createWriteQueue } from './storageQueue';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import { CURRENT_USER, INITIAL_POOLS } from '../data/mockPools';
+import { getHostedCloudConfig, isHostedBuild } from '../config/appMode';
 import {
   AtomicClaimResult,
   CatalogItem,
@@ -20,8 +21,6 @@ import {
   ReceiptTrueUp,
   WishlistRequest,
 } from '../types/groupBuy';
-
-declare const process: { env: Record<string, string | undefined> };
 
 export const CLOUD_SYNC_AVAILABLE = true;
 const enqueueWrite = createWriteQueue();
@@ -77,12 +76,15 @@ export interface PendingCloudEdit {
 
 let activeClient: SupabaseClient | null = null;
 let activeChannel: RealtimeChannel | null = null;
-let currentConfig: SupabaseConfig = {
-  url: process.env.EXPO_PUBLIC_SUPABASE_URL || '',
-  anonKey: process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '',
-  enabled: Boolean(
-    process.env.EXPO_PUBLIC_SUPABASE_URL && process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY
-  ),
+function hostedConfigOrNull(): SupabaseConfig | null {
+  const hosted = getHostedCloudConfig();
+  return hosted ? { url: hosted.url, anonKey: hosted.anonKey, enabled: true } : null;
+}
+
+let currentConfig: SupabaseConfig = hostedConfigOrNull() ?? {
+  url: '',
+  anonKey: '',
+  enabled: false,
 };
 
 export const DEMO_PROFILES: Participant[] = [
@@ -498,6 +500,15 @@ export const PoolRepository = {
   },
 
   async initConfig(): Promise<SupabaseConfig> {
+    const hosted = hostedConfigOrNull();
+    if (hosted) {
+      // Hosted builds always use the bundled backend; saved dev configs are ignored.
+      if (currentConfig.url !== hosted.url || currentConfig.anonKey !== hosted.anonKey) {
+        activeClient = null;
+      }
+      currentConfig = hosted;
+      return currentConfig;
+    }
     try {
       const saved = await AsyncStorage.getItem(STORAGE_KEY_SUPABASE_CONFIG);
       if (saved) {
@@ -522,6 +533,9 @@ export const PoolRepository = {
   },
 
   async saveSupabaseConfig(config: SupabaseConfig): Promise<void> {
+    if (isHostedBuild()) {
+      throw new Error('This build is connected to the PoolCart service and cannot change its backend.');
+    }
     const trimmedUrl = config.url.trim();
     const trimmedKey = config.anonKey.trim();
     if (config.enabled && (!trimmedUrl || !trimmedKey)) {
@@ -707,6 +721,41 @@ export const PoolRepository = {
     if (client) {
       await client.auth.signOut();
     }
+    if (isHostedBuild()) {
+      await this.clearSignedInDeviceData();
+    }
+  },
+
+  /**
+   * Removes cached shared-pool data and unsent edits from this device so the
+   * next person to sign in never sees the previous account's pools.
+   */
+  async clearSignedInDeviceData(): Promise<void> {
+    await enqueueWrite(() => AsyncStorage.setItem(STORAGE_KEY_POOLS, '[]'));
+    await this.clearPendingCloudEdits();
+  },
+
+  /**
+   * Permanently deletes the signed-in account through the `delete_my_account`
+   * RPC (profile, memberships, claims, messages, hosted pools, and the auth
+   * user), then clears this device's cached data and session.
+   */
+  async deleteCloudAccount(): Promise<void> {
+    const client = getOrCreateSupabaseClient();
+    if (!client) {
+      throw new Error('Sign in to your PoolCart account before deleting it.');
+    }
+    const { error } = await client.rpc('delete_my_account');
+    if (error) {
+      throw new Error(error.message || 'Account deletion failed. Nothing was deleted.');
+    }
+    try {
+      // The server-side user no longer exists; only drop the local session.
+      await client.auth.signOut({ scope: 'local' });
+    } catch {
+      // Session cleanup failure must not mask a completed deletion.
+    }
+    await this.clearSignedInDeviceData();
   },
 
   async loadActiveUser(): Promise<Participant> {
@@ -791,7 +840,8 @@ export const PoolRepository = {
     if (client) {
       const { user: cloudUser, error: authErr } = await this.getAuthenticatedCloudUser();
       if (!cloudUser) {
-        const localFallback = await this.loadLocalPools();
+        // Hosted builds show nothing until someone signs in.
+        const localFallback = isHostedBuild() ? [] : await this.loadLocalPools();
         return {
           pools: localFallback,
           cloudState: authErr ? 'auth_rejected' : 'auth_required',
@@ -871,6 +921,12 @@ export const PoolRepository = {
 
   async loadLocalPools(): Promise<GroupBuyPool[]> {
     const raw = await AsyncStorage.getItem(STORAGE_KEY_POOLS);
+    if (isHostedBuild()) {
+      // Hosted builds never fall back to sample pools; '[]' marks a cleared cache.
+      if (raw === null) return [];
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length === 0) return [];
+    }
     const pools = normalizePools(raw === null ? INITIAL_POOLS : JSON.parse(raw));
     if (raw === null) await this.saveLocalPools(pools);
     return pools;

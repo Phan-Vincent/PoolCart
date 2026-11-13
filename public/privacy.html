@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PoolCart Privacy Policy</title>
+<style>
+  :root { --fg: #0f172a; --muted: #475569; --accent: #0d9488; --bg: #f8fafc; --card: #ffffff; --rule: #e2e8f0; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e2e8f0; --muted: #94a3b8; --accent: #2dd4bf; --bg: #0b1220; --card: #111a2e; --rule: #1e293b; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  h2 { font-size: 19px; margin: 32px 0 8px; color: var(--accent); }
+  p, li { color: var(--fg); }
+  .meta { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  table { width: 100%; border-collapse: collapse; background: var(--card); font-size: 15px; }
+  th, td { text-align: left; vertical-align: top; padding: 10px; border-bottom: 1px solid var(--rule); }
+  th { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .fill { background: #fef3c7; color: #78350f; padding: 0 4px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>PoolCart Privacy Policy</h1>
+  <p class="meta">Effective <span class="fill">[DATE]</span> · Operated by <span class="fill">[OPERATOR NAME]</span> · Contact: <span class="fill">[CONTACT EMAIL]</span></p>
+
+  <p>PoolCart helps neighbors combine grocery orders, split wholesale cases, and arrange porch pickup. This policy explains what the PoolCart app and website collect, why, who can see it, and how to delete it.</p>
+
+  <h2>What we collect</h2>
+  <table>
+    <tr><th>Data</th><th>Why</th><th>Who can see it</th></tr>
+    <tr><td>Email address and password</td><td>To create and sign in to your account. Passwords are stored only as a salted hash by our authentication provider.</td><td>Only you and the PoolCart service.</td></tr>
+    <tr><td>Display name, neighborhood, avatar color</td><td>To show neighbors who joined a pool and who claimed which items.</td><td>Members of pools you join.</td></tr>
+    <tr><td>Your claims, order quantities, amounts due, and payment or pickup status</td><td>To split cases and calculate each neighbor's exact share.</td><td>Members of that pool. The host confirms payments.</td></tr>
+    <tr><td>Chat messages and wishlist requests</td><td>To coordinate each pool.</td><td>Members of that pool.</td></tr>
+    <tr><td>Pool details entered by hosts: pickup address, pickup window, porch cooler note or gate code, and Venmo handle</td><td>So members can pay the host and collect their groceries.</td><td>Members of that pool only. Non-members cannot read them.</td></tr>
+  </table>
+  <p>We do not collect your location, contacts, photos, or device identifiers. We do not use analytics or advertising SDKs, and we do not track you across other apps or websites.</p>
+
+  <h2>Payments</h2>
+  <p>PoolCart does not process payments or collect card or bank details. When you choose to pay, the app opens Venmo with the amount filled in. That payment happens entirely in Venmo under Venmo's own privacy policy. The host then marks your payment as received in PoolCart.</p>
+
+  <h2>Service providers</h2>
+  <ul>
+    <li><strong>Supabase</strong> hosts our database and handles sign-in.</li>
+    <li><strong>Vercel</strong> hosts the PoolCart website.</li>
+  </ul>
+  <p>These providers process data only to run PoolCart. We do not sell or rent your personal information, and we do not share it for advertising.</p>
+
+  <h2>Data on your device</h2>
+  <p>The app keeps a copy of your pools and any unsent changes on your device so it can work through brief connection drops. Signing out or deleting your account clears this copy.</p>
+
+  <h2>Retention and deletion</h2>
+  <p>We keep your data while your account exists. You can delete your account at any time in the app under <strong>Account → Delete account</strong>. Deletion is immediate and permanent:</p>
+  <ul>
+    <li>Your account, profile, chat messages, wishlist requests, and pledges are deleted.</li>
+    <li>Pools you host are deleted for all members.</li>
+    <li>In pools that are still open, your claims and membership are removed.</li>
+    <li>In pools that were already locked and ordered from the supplier, your order lines are kept so the host can settle the supplier invoice. They are relabeled “Deleted neighbor” and no longer linked to any account.</li>
+  </ul>
+  <p>If you cannot open the app, email <span class="fill">[CONTACT EMAIL]</span> from your account's email address and we will delete your account within 30 days.</p>
+
+  <h2>Security</h2>
+  <p>All traffic is encrypted in transit. Database access rules let you read only the pools you belong to, and every change goes through server-side checks of who you are and what role you hold in that pool.</p>
+
+  <h2>Children</h2>
+  <p>PoolCart is not directed to children under 13, and we do not knowingly collect their personal information. If you believe a child has created an account, contact us and we will delete it.</p>
+
+  <h2>Your rights</h2>
+  <p>Depending on where you live, you may have rights to access, correct, or delete your personal information, or to object to certain processing. You can delete your account in the app, or contact us to access or correct your information. We will not discriminate against you for exercising these rights.</p>
+
+  <h2>Changes</h2>
+  <p>If we change this policy, we will update the effective date above. For significant changes, we will notify you in the app.</p>
+</main>
+</body>
+</html>

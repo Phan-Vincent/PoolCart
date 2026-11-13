@@ -1,14 +1,14 @@
 {
   "expo": {
-    "name": "PoolCart - Grocery Group Buy",
+    "name": "PoolCart",
     "slug": "poolcart",
     "scheme": "poolcart",
     "version": "1.0.0",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true,
+      "supportsTablet": false,
       "bundleIdentifier": "com.poolcart.grocerygroupbuy",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
@@ -19,10 +19,13 @@
     },
     "android": {
       "package": "com.poolcart.grocerygroupbuy",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0D9488"
+      },
       "intentFilters": [
         {
           "action": "VIEW",
-          "autoVerify": true,
           "data": [
             {
               "scheme": "poolcart"
@@ -38,10 +41,22 @@
     "web": {
       "bundler": "metro",
       "output": "single",
+      "favicon": "./assets/favicon.png",
       "name": "PoolCart — Neighborhood Grocery Group Buys",
       "shortName": "PoolCart",
       "themeColor": "#0D9488",
       "backgroundColor": "#F8FAFC"
-    }
+    },
+    "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#0D9488"
+        }
+      ]
+    ]
   }
 }
