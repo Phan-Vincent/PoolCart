@@ -147,6 +147,11 @@ create table if not exists public.pool_messages (
   created_at timestamptz not null default now()
 );
 
+-- Covering indexes for pool_id foreign keys
+create index if not exists idx_catalog_items_pool_id on public.catalog_items (pool_id);
+create index if not exists idx_item_claims_pool_id on public.item_claims (pool_id);
+create index if not exists idx_pool_messages_pool_id on public.pool_messages (pool_id);
+
 -- ============================================================================
 -- 7. Helper Authorization Functions (Server Identity Enforcement)
 -- ============================================================================
@@ -1216,32 +1221,32 @@ drop policy if exists "Users can read and update own profile" on public.user_pro
 create policy "Pool members can read pools"
   on public.pools for select
   to authenticated
-  using (public.is_pool_member(id, auth.uid()::text));
+  using (public.is_pool_member(id, (select auth.uid())::text));
 
 create policy "Pool members can read participants"
   on public.pool_participants for select
   to authenticated
-  using (public.is_pool_member(pool_id, auth.uid()::text));
+  using (public.is_pool_member(pool_id, (select auth.uid())::text));
 
 create policy "Pool members can read catalog items"
   on public.catalog_items for select
   to authenticated
-  using (public.is_pool_member(pool_id, auth.uid()::text));
+  using (public.is_pool_member(pool_id, (select auth.uid())::text));
 
 create policy "Pool members can read item claims"
   on public.item_claims for select
   to authenticated
-  using (public.is_pool_member(pool_id, auth.uid()::text));
+  using (public.is_pool_member(pool_id, (select auth.uid())::text));
 
 create policy "Pool members can read pool messages"
   on public.pool_messages for select
   to authenticated
-  using (public.is_pool_member(pool_id, auth.uid()::text));
+  using (public.is_pool_member(pool_id, (select auth.uid())::text));
 
 create policy "Users can read and update own profile"
   on public.user_profiles for select
   to authenticated
-  using (user_id = auth.uid()::text);
+  using (user_id = (select auth.uid())::text);
 
 -- Revoke direct unguarded table mutations from anon and authenticated;
 -- all writes go through transactional SECURITY DEFINER RPCs that enforce roles and locks.
@@ -1263,6 +1268,14 @@ revoke execute on function public.join_pool_by_invite(text, text, text, text) fr
 revoke execute on function public.create_pool_with_catalog(jsonb) from public, anon;
 revoke execute on function public.upsert_my_profile(text, text, text) from public, anon;
 revoke execute on function public.delete_my_account() from public, anon;
+
+-- Internal helpers are called only from SECURITY DEFINER RPCs (run as owner).
+-- is_pool_member stays executable by `authenticated` because RLS policies call it.
+revoke execute on function public.require_authenticated_uid() from public, anon, authenticated;
+revoke execute on function public.is_pool_host_user(text, text) from public, anon, authenticated;
+revoke execute on function public.recompute_pool_order_summary(text) from public, anon, authenticated;
+revoke execute on function public.is_pool_member(text, text) from public, anon;
+grant execute on function public.is_pool_member(text, text) to authenticated;
 
 grant execute on function public.claim_item_share(text, text, text, text, text, text, integer) to authenticated;
 grant execute on function public.apply_pool_action_rpc(text, jsonb) to authenticated;

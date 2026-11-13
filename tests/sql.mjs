@@ -93,6 +93,15 @@ assert.equal((await q(`select 1 from public.pools where id = 'p1'`)).length, 0);
 assert.equal((await q(`select 1 from public.catalog_items where pool_id = 'p1'`)).length, 0);
 assert.equal((await q(`select 1 from public.pools where id in ('p2','p3')`)).length, 2, 'other pools kept');
 
+// Internal helpers are not callable through the API; RLS helper only for signed-in users
+const priv = async (role, fn) => (await q(`select has_function_privilege('${role}', '${fn}', 'execute') as ok`))[0].ok;
+for (const fn of ['public.require_authenticated_uid()', 'public.is_pool_host_user(text, text)', 'public.recompute_pool_order_summary(text)']) {
+  assert.equal(await priv('anon', fn), false, `anon must not execute ${fn}`);
+  assert.equal(await priv('authenticated', fn), false, `authenticated must not execute ${fn}`);
+}
+assert.equal(await priv('anon', 'public.is_pool_member(text, text)'), false);
+assert.equal(await priv('authenticated', 'public.is_pool_member(text, text)'), true);
+
 // Grants: only authenticated may execute
 const grants = await q(`select grantee from information_schema.role_routine_grants
   where routine_name = 'delete_my_account' and grantee in ('anon','authenticated','PUBLIC')`);

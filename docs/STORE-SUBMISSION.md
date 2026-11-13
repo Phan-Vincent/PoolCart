@@ -2,13 +2,19 @@
 
 Code-side blockers are handled in the repo: icons and splash, a hosted build mode with a sign-in gate, demo features hidden in store builds, in-app account deletion, and a privacy policy page. The steps below need your accounts, so they have to be done by you.
 
-## 1. Production backend (Supabase)
+## 1. Production backend (Supabase) — done 2026-11-12
 
-1. Create a production Supabase project (separate from any test project).
-2. In **SQL Editor**, run `supabase/schema.sql`. It can be re-run safely; `npm run test:sql` applies it twice to a local Postgres to confirm that.
-3. **Authentication → Providers → Email**: keep email confirmation **on**.
-4. **Authentication → URL Configuration**: set Site URL to your website (for example the Vercel domain).
-5. Copy the **Project URL** and **anon/public key** from Project Settings → API.
+- Project `poolcart-prod`, ref `xvfrmivhkrlpodwsadxc`, region us-west-1, org PoolCart (free plan).
+- `EXPO_PUBLIC_SUPABASE_URL` = `https://xvfrmivhkrlpodwsadxc.supabase.co`
+- `EXPO_PUBLIC_SUPABASE_ANON_KEY` = the legacy **anon** key from Project Settings → API Keys. It's public by design (row-level security and server-side checks protect the data), but it's left out of this file so it can be rotated.
+- `supabase/schema.sql` applied as migrations `poolcart_01`–`05`. The live function sources match the repo file exactly (checked by checksum). `delete_my_account` and a host → join → claim → outsider-blocked flow were exercised live as the `authenticated` role, then cleaned up.
+- Advisors: performance clean. The remaining security notes list the RPCs signed-in users are meant to call.
+
+Still to do in the dashboard:
+1. **Authentication → Providers → Email**: confirm email confirmation is **on** (it is by default).
+2. **Authentication → URL Configuration**: set Site URL to your website once the Vercel domain exists.
+3. **Before launch:** upgrade the org to Pro. Free projects pause after about a week without activity.
+4. To change the schema later, edit `supabase/schema.sql`, run `npm run test:sql`, then apply only the changed statements as a new migration.
 
 ## 2. Privacy policy
 

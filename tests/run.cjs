@@ -649,7 +649,7 @@ test('SQL schema defines non-destructive rich columns, member-scoped RLS, and re
   assert(sql.includes('alter table public.pool_participants add column if not exists settled_amount numeric;'));
   assert(sql.includes('create or replace function public.join_pool_by_invite('));
   assert(sql.includes('create or replace function public.apply_pool_action_rpc('));
-  assert(sql.includes('using (public.is_pool_member(id, auth.uid()::text))'));
+  assert(sql.includes('using (public.is_pool_member(id, (select auth.uid())::text))'));
   assert(sql.includes('revoke insert, update, delete, truncate on public.user_profiles, public.pools'));
   assert(!sql.includes('using (true) with check (true)'));
 });
