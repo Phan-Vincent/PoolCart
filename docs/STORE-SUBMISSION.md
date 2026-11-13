@@ -16,11 +16,14 @@ Still to do in the dashboard:
 3. **Before launch:** upgrade the org to Pro. Free projects pause after about a week without activity.
 4. To change the schema later, edit `supabase/schema.sql`, run `npm run test:sql`, then apply only the changed statements as a new migration.
 
-## 2. Privacy policy
+## 2. Privacy policy and website — done 2026-11-12
 
-1. Fill in the highlighted `[DATE]`, `[OPERATOR NAME]`, and `[CONTACT EMAIL]` placeholders in `public/privacy.html`.
-2. Deploy the web export to Vercel (`vercel.json` is already set up). The page is served at `/privacy`.
-3. Use that URL for `EXPO_PUBLIC_PRIVACY_POLICY_URL` and in both store listings.
+- Vercel project `poolcart`, production at **https://poolcart.vercel.app**. The root is the store web build (sign-in screen, connected to `poolcart-prod`).
+- Privacy policy: **https://poolcart.vercel.app/privacy**. Use this URL in both store listings and for `EXPO_PUBLIC_PRIVACY_POLICY_URL` in EAS.
+- Vercel production env vars: `EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY` (public config by design), `EXPO_PUBLIC_PRIVACY_POLICY_URL`.
+- Redeploy after changes with `vercel deploy --prod`. `.vercelignore` keeps `qa/`, `docs/`, and `tests/` out of the upload.
+- Remove the stray `EXPO_PUBLIC_TEST_PROBE` env var: `vercel env rm EXPO_PUBLIC_TEST_PROBE production` (the CLI needs you to confirm interactively).
+- In Supabase: **Authentication → URL Configuration → Site URL** = `https://poolcart.vercel.app`. This is what email confirmation links point to.
 
 ## 3. EAS
 
@@ -28,9 +31,9 @@ Still to do in the dashboard:
 npm install -g eas-cli
 eas login
 eas init                      # writes owner + extra.eas.projectId into app.json
-eas env:create --environment production --name EXPO_PUBLIC_SUPABASE_URL --value https://<project>.supabase.co --visibility plaintext
+eas env:create --environment production --name EXPO_PUBLIC_SUPABASE_URL --value https://xvfrmivhkrlpodwsadxc.supabase.co --visibility plaintext
 eas env:create --environment production --name EXPO_PUBLIC_SUPABASE_ANON_KEY --value <anon key> --visibility plaintext
-eas env:create --environment production --name EXPO_PUBLIC_PRIVACY_POLICY_URL --value https://<domain>/privacy --visibility plaintext
+eas env:create --environment production --name EXPO_PUBLIC_PRIVACY_POLICY_URL --value https://poolcart.vercel.app/privacy --visibility plaintext
 ```
 
 Repeat the `env:create` lines with `--environment preview` for internal test builds.
