@@ -1,0 +1,14 @@
+node_modules/
+.expo/
+dist/
+web-build/
+.env
+.DS_Store
+.Rhistory
+*.log
+.vercel
+.env*
+!.env.example
+
+# EAS-only: keep local QA bundles out of build uploads
+qa/
