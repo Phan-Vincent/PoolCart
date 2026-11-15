@@ -75,6 +75,7 @@ import { BulkImportModal } from './src/components/BulkImportModal';
 import { SupabaseSetupCard } from './src/components/SupabaseSetupCard';
 import { AuthScreen } from './src/components/AuthScreen';
 import { getPrivacyPolicyUrl, isHostedBuild } from './src/config/appMode';
+import type { ReportReason } from './src/utils/contentFilter';
 
 // Store builds bundle the production backend and hide local demo features.
 const HOSTED_BUILD = isHostedBuild();
@@ -157,6 +158,25 @@ export default function App() {
   const isCloudMode = PoolRepository.getCurrentConfig().enabled;
   const activeUser: Participant =
     isCloudMode && cloudAuthUser ? cloudAuthUser : localDemoUser;
+
+  // Chat safety: neighbors this person blocked (hidden in every pool's chat).
+  const [blockedUserIds, setBlockedUserIds] = useState<string[]>([]);
+  const blockOwnerId = isCloudMode ? cloudAuthUser?.id ?? '' : 'local';
+  useEffect(() => {
+    let cancelled = false;
+    if (!blockOwnerId) {
+      setBlockedUserIds([]);
+      return;
+    }
+    PoolRepository.loadBlockedUserIds()
+      .then((ids) => {
+        if (!cancelled) setBlockedUserIds(ids);
+      })
+      .catch((err) => console.warn('Failed to load blocked neighbors:', err));
+    return () => {
+      cancelled = true;
+    };
+  }, [blockOwnerId]);
 
   const formatTimestamp = () => {
     const now = new Date();
@@ -751,6 +771,14 @@ export default function App() {
   };
   const handleReclaimReceiptItems = async (receipt: PastOrderReceipt) => {
     await mutate({ type: 'reorder', receipt });
+  };
+  const handleSetUserBlocked = async (userId: string, blocked: boolean) => {
+    const ids = await PoolRepository.setUserBlocked(userId, blocked);
+    setBlockedUserIds(ids);
+    if (isCloudMode) await refreshPools();
+  };
+  const handleReportMessage = async (messageId: string, reason: ReportReason) => {
+    await PoolRepository.reportMessage(messageId, reason);
   };
   const handleSendMessage = async (text: string, isAnnouncement: boolean) => {
     if (!activePool) return;
@@ -1571,6 +1599,10 @@ export default function App() {
               pool={activePool}
               activeUser={activeUser}
               onSendMessage={handleSendMessage}
+              blockedUserIds={blockedUserIds}
+              canReport={isCloudMode && !!cloudAuthUser}
+              onReportMessage={handleReportMessage}
+              onSetUserBlocked={handleSetUserBlocked}
             />
           )}
 

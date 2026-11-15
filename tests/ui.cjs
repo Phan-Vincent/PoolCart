@@ -143,4 +143,25 @@ module.exports = function registerComponentChecks(test, {assert, pool, finalized
     assert(buttons.some(b=>b.label.includes('Delete account')));
     assert(!buttons.some(b=>b.label.includes('Delete permanently')),'destructive action needs a second confirmation step');
   });
+  test('Pool chat offers Report and Block on other neighbors\' messages and hides blocked neighbors',()=>{
+    const p=pool();
+    p.messages=[
+      {id:'m1',poolId:'p',userId:host.id,userName:host.name,avatarColor:'#111',text:'Rice is here',createdAt:'now'},
+      {id:'m2',poolId:'p',userId:member.id,userName:member.name,avatarColor:'#222',text:'Thanks!',createdAt:'now'},
+      {id:'m3',poolId:'p',userId:'z',userName:'Zed',avatarColor:'#333',text:'buy my stuff',createdAt:'now'},
+    ];
+    const asyncNoop=async()=>{};
+    let html=render(PoolChatView,{pool:p,activeUser:member,onSendMessage:noop,blockedUserIds:[],canReport:true,onReportMessage:asyncNoop,onSetUserBlocked:asyncNoop});
+    assert.equal(buttons.filter(b=>b.label==='Report').length,2,'report on each message from someone else');
+    assert.equal(buttons.filter(b=>b.label==='Block').length,2,'block on each message from someone else');
+    assert(buttons.some(b=>b.accessibilityLabel==='Report message from Zed'));
+    assert(!buttons.some(b=>b.accessibilityLabel===`Block ${member.name}`),'no report/block on your own message');
+    html=render(PoolChatView,{pool:p,activeUser:member,onSendMessage:noop,blockedUserIds:['z'],canReport:true,onReportMessage:asyncNoop,onSetUserBlocked:asyncNoop});
+    assert(!html.includes('buy my stuff'),'blocked neighbor messages are hidden');
+    assert(html.includes('BLOCKED NEIGHBORS (1)')&&html.includes('Zed'));
+    assert(buttons.some(b=>b.label==='Unblock'));
+    render(PoolChatView,{pool:p,activeUser:member,onSendMessage:noop,blockedUserIds:[],canReport:false,onReportMessage:asyncNoop,onSetUserBlocked:asyncNoop});
+    assert.equal(buttons.filter(b=>b.label==='Report').length,0,'reports need a signed-in account');
+    assert.equal(buttons.filter(b=>b.label==='Block').length,2);
+  });
 };

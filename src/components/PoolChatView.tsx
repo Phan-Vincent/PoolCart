@@ -9,23 +9,67 @@ import {
 import { GroupBuyPool, Participant, PoolMessage } from '../types/groupBuy';
 import { isPoolHost } from '../utils/poolActions';
 import { getCaseSplitStatus } from '../utils/calculations';
+import { REPORT_REASONS, ReportReason } from '../utils/contentFilter';
 
 interface Props {
   pool: GroupBuyPool;
   activeUser: Participant;
   onSendMessage: (text: string, isAnnouncement: boolean) => void;
+  /** Neighbors this person has blocked; their messages are hidden everywhere. */
+  blockedUserIds?: string[];
+  /** Reports need a signed-in account (they go to PoolCart for review). */
+  canReport?: boolean;
+  onReportMessage?: (messageId: string, reason: ReportReason) => Promise<void>;
+  onSetUserBlocked?: (userId: string, blocked: boolean) => Promise<void>;
 }
+
+type SafetyPanel =
+  | { kind: 'report'; messageId: string; userId: string; userName: string }
+  | { kind: 'block'; messageId: string; userId: string; userName: string }
+  | { kind: 'reported'; messageId: string; userId: string; userName: string };
 
 export const PoolChatView: React.FC<Props> = ({
   pool,
   activeUser,
   onSendMessage,
+  blockedUserIds = [],
+  canReport = false,
+  onReportMessage,
+  onSetUserBlocked,
 }) => {
   const host = isPoolHost(pool, activeUser.id);
   const [draft, setDraft] = useState('');
   const [postAsAnnouncement, setPostAsAnnouncement] = useState(false);
+  const [panel, setPanel] = useState<SafetyPanel | null>(null);
+  const [safetyBusy, setSafetyBusy] = useState(false);
+  const [safetyError, setSafetyError] = useState('');
 
-  const messages: PoolMessage[] = pool.messages || [];
+  const blocked = new Set(blockedUserIds);
+  const messages: PoolMessage[] = (pool.messages || []).filter(
+    (m) => !blocked.has(m.userId)
+  );
+  const nameFor = (userId: string) =>
+    pool.participants.find((p) => p.id === userId)?.name ||
+    (pool.messages || []).find((m) => m.userId === userId)?.userName ||
+    'Neighbor';
+
+  const runSafetyAction = async (work: () => Promise<void>, next: SafetyPanel | null) => {
+    setSafetyBusy(true);
+    setSafetyError('');
+    try {
+      await work();
+      setPanel(next);
+    } catch (err) {
+      setSafetyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSafetyBusy(false);
+    }
+  };
+
+  const openPanel = (next: SafetyPanel) => {
+    setSafetyError('');
+    setPanel(next);
+  };
   const pinnedAnnouncements = messages.filter((m) => m.isAnnouncement);
 
   // Quick helper prompts so neighbors or hosts can post 1-tap case-split calls
@@ -162,9 +206,119 @@ export const PoolChatView: React.FC<Props> = ({
                 <Text style={styles.msgTime}>{msg.createdAt}</Text>
               </View>
               <Text style={styles.msgBody}>{msg.text}</Text>
+
+              {!isMe && (onReportMessage || onSetUserBlocked) && (
+                <View style={styles.safetyRow}>
+                  {canReport && onReportMessage && (
+                    <TouchableOpacity
+                      accessibilityRole="button"
+                      accessibilityLabel={`Report message from ${msg.userName}`}
+                      onPress={() =>
+                        openPanel({ kind: 'report', messageId: msg.id, userId: msg.userId, userName: msg.userName })
+                      }
+                    >
+                      <Text style={styles.safetyLink}>Report</Text>
+                    </TouchableOpacity>
+                  )}
+                  {onSetUserBlocked && (
+                    <TouchableOpacity
+                      accessibilityRole="button"
+                      accessibilityLabel={`Block ${msg.userName}`}
+                      onPress={() => openPanel({ kind: 'block', messageId: msg.id, userId: msg.userId, userName: msg.userName })}
+                    >
+                      <Text style={styles.safetyLink}>Block</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              )}
+
+              {panel?.kind === 'report' && panel.messageId === msg.id && (
+                <View style={styles.safetyPanel}>
+                  <Text style={styles.safetyTitle}>Why are you reporting this message?</Text>
+                  <View style={styles.reasonRow}>
+                    {REPORT_REASONS.map((r) => (
+                      <TouchableOpacity
+                        key={r.value}
+                        style={styles.reasonChip}
+                        disabled={safetyBusy}
+                        accessibilityRole="button"
+                        onPress={() =>
+                          runSafetyAction(
+                            () => onReportMessage!(msg.id, r.value),
+                            { kind: 'reported', messageId: msg.id, userId: msg.userId, userName: msg.userName }
+                          )
+                        }
+                      >
+                        <Text style={styles.reasonChipText}>{r.label}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  {!!safetyError && <Text style={styles.safetyErrorText}>{safetyError}</Text>}
+                  <TouchableOpacity onPress={() => setPanel(null)} disabled={safetyBusy}>
+                    <Text style={styles.safetyCancel}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {panel && panel.kind !== 'report' && panel.messageId === msg.id && (
+                <View style={styles.safetyPanel}>
+                  {panel.kind === 'reported' && (
+                    <Text style={styles.safetyTitle}>
+                      Thanks. PoolCart will review this report.
+                      {onSetUserBlocked ? ` Do you also want to block ${panel.userName}?` : ''}
+                    </Text>
+                  )}
+                  {panel.kind === 'block' && (
+                    <Text style={styles.safetyTitle}>
+                      Block {panel.userName}? You won't see their messages in any pool, including
+                      announcements if they host one. They aren't told.
+                    </Text>
+                  )}
+                  {!!safetyError && <Text style={styles.safetyErrorText}>{safetyError}</Text>}
+                  <View style={styles.reasonRow}>
+                    {onSetUserBlocked && (
+                      <TouchableOpacity
+                        style={styles.blockBtn}
+                        disabled={safetyBusy}
+                        accessibilityRole="button"
+                        onPress={() =>
+                          runSafetyAction(() => onSetUserBlocked(panel.userId, true), null)
+                        }
+                      >
+                        <Text style={styles.blockBtnText}>Block {panel.userName}</Text>
+                      </TouchableOpacity>
+                    )}
+                    <TouchableOpacity onPress={() => setPanel(null)} disabled={safetyBusy}>
+                      <Text style={styles.safetyCancel}>
+                        {panel.kind === 'reported' ? 'Done' : 'Cancel'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
             </View>
           );
         })
+      )}
+
+      {blockedUserIds.length > 0 && onSetUserBlocked && (
+        <View style={styles.blockedBox}>
+          <Text style={styles.blockedHeader}>
+            BLOCKED NEIGHBORS ({blockedUserIds.length})
+          </Text>
+          {blockedUserIds.map((id) => (
+            <View key={id} style={styles.blockedRow}>
+              <Text style={styles.blockedName}>{nameFor(id)}</Text>
+              <TouchableOpacity
+                accessibilityRole="button"
+                disabled={safetyBusy}
+                onPress={() => runSafetyAction(() => onSetUserBlocked(id, false), null)}
+              >
+                <Text style={styles.safetyLink}>Unblock</Text>
+              </TouchableOpacity>
+            </View>
+          ))}
+        </View>
       )}
 
       {/* Composer */}
@@ -218,6 +372,96 @@ export const PoolChatView: React.FC<Props> = ({
 };
 
 const styles = StyleSheet.create({
+  safetyRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 14,
+    marginTop: 6,
+  },
+  safetyLink: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#64748B',
+  },
+  safetyPanel: {
+    marginTop: 8,
+    padding: 10,
+    borderRadius: 10,
+    backgroundColor: '#F1F5F9',
+  },
+  safetyTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#0F172A',
+    marginBottom: 8,
+  },
+  reasonRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 8,
+  },
+  reasonChip: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  reasonChipText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  safetyCancel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#64748B',
+    marginTop: 8,
+    paddingHorizontal: 4,
+  },
+  safetyErrorText: {
+    fontSize: 12,
+    color: '#B91C1C',
+    marginBottom: 6,
+  },
+  blockBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: '#B91C1C',
+  },
+  blockBtnText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  blockedBox: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    backgroundColor: '#FFFFFF',
+  },
+  blockedHeader: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#64748B',
+    letterSpacing: 0.6,
+    marginBottom: 6,
+  },
+  blockedRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 6,
+  },
+  blockedName: {
+    fontSize: 14,
+    color: '#0F172A',
+  },
   container: {
     paddingBottom: 28,
   },

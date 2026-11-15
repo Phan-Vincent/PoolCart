@@ -994,5 +994,38 @@ test('SQL schema grants self-service account deletion to signed-in users only',(
   assert(sql.includes('grant execute on function public.delete_my_account() to authenticated;'));
 });
 
+const filter=require('../src/utils/contentFilter.ts');
+test('Chat filter blocks objectionable words without catching ordinary ones, and mirrors the SQL list',()=>{
+  for(const bad of ['this is FUCKING ridiculous','what a bitch','shitty rice']) assert(filter.containsBlockedTerms(bad),bad);
+  for(const ok of ['spicy salsa','Scunthorpe pickup','assorted shiitake','Class of 2026','']) assert(!filter.containsBlockedTerms(ok),ok);
+  const sql=fs.readFileSync(path.join(root,'supabase/schema.sql'),'utf8');
+  const m=sql.match(/~\* '\\m\(([^)]*)\)\(s\|es\|y\|ing\|ed\|er\|ers\)\?\\M'/);
+  assert(m,'SQL filter pattern present');assert.deepEqual(m[1].split('|'),[...filter.BLOCKED_TERMS]);
+  assert.equal(filter.BLOCKED_TERM_SUFFIXES,'(s|es|y|ing|ed|er|ers)?');
+  assert.throws(()=>apply(pool(),member,{type:'message',message:{id:'m',poolId:'p',userId:member.id,userName:member.name,avatarColor:'#222',text:'you bitch',createdAt:'now'}}),/isn't allowed/);
+  assert.equal(apply(pool(),member,{type:'message',message:{id:'m',poolId:'p',userId:member.id,userName:member.name,avatarColor:'#222',text:'Who wants rice?',createdAt:'now'}}).messages.length,1);
+});
+test('Signed-in report and block go through the server RPCs; the local demo keeps blocks on this device and sends no reports',async()=>{
+  storage.delete('@poolcart_blocked_users_v1');
+  await assert.rejects(()=>PoolRepository.reportMessage('m1','spam'),/signed-in/);
+  assert.deepEqual(await PoolRepository.setUserBlocked('z',true),['z']);
+  assert.deepEqual(await PoolRepository.loadBlockedUserIds(),['z']);
+  assert.deepEqual(await PoolRepository.setUserBlocked('z',false),[]);
+  await withHostedBuild(async()=>{
+    const calls=[];let blocked=[];let rpcError=null;
+    mockSupabaseFactory=()=>({
+      rpc:async(name,args)=>{calls.push([name,args]);if(rpcError)return {data:null,error:rpcError};if(name==='block_user')blocked.push(args.p_blocked_id);if(name==='unblock_user')blocked=blocked.filter(id=>id!==args.p_blocked_id);return {data:{ok:true},error:null};},
+      from:(table)=>({select:async()=>{calls.push(['select',table]);return {data:blocked.map(id=>({blocked_id:id})),error:null};}}),
+      auth:{getSession:async()=>({data:{session:null},error:null})},
+    });
+    await PoolRepository.initConfig();
+    assert.deepEqual(await PoolRepository.setUserBlocked('u2',true),['u2']);
+    await PoolRepository.reportMessage('m9','harassment','  rude  ');
+    assert.deepEqual(calls,[['block_user',{p_blocked_id:'u2'}],['select','user_blocks'],['report_pool_message',{p_message_id:'m9',p_reason:'harassment',p_details:'rude'}]]);
+    assert.deepEqual(await PoolRepository.setUserBlocked('u2',false),[]);
+    rpcError={message:'You cannot report your own message.'};
+    await assert.rejects(()=>PoolRepository.reportMessage('m1','spam'),/your own message/);
+  });
+});
 require('./ui.cjs')(test, {assert, pool, finalized, host, member, initialPools: INITIAL_POOLS, ts});
 (async()=>{let failed=0;for(const t of tests){try{await t.run();console.log(`PASS ${t.name}`);}catch(error){failed++;console.error(`FAIL ${t.name}\n${error.stack}`);}}console.log(`\n${tests.length-failed}/${tests.length} test groups passed. No network, database, or running Expo app used.`);process.exitCode=failed?1:0;})();
