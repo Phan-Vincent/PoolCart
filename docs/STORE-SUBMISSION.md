@@ -42,6 +42,12 @@ eas submit --platform android  # first upload must be done manually in Play Cons
 
 Builds without the two Supabase variables run as the local demo, so check that the TestFlight build opens on the sign-in screen.
 
+### Build and signing status (2026-11-14)
+
+- **iOS:** Apple team Vincent Phan (Individual) `77FQBK9E92`. EAS-managed distribution certificate and App Store provisioning profile, both valid until 2027-11-14. Build 1.0.0 (5) was submitted to App Store Connect app **6834996608** (pinned as `ascAppId` in `eas.json`). The TestFlight group "Team (Expo)" includes phanvincent2@gmail.com. An ASC API key is stored on EAS, so `eas submit --platform ios --latest` no longer needs your password.
+- **Android:** EAS-managed upload keystore. Production `.aab` 1.0.0 (2) is built but not yet uploaded; the first upload goes through Play Console → Internal testing by hand. `eas build -p android --profile preview` makes a sideloadable `.apk` against the production backend.
+- **Don't delete** the keystore or certificates in the Expo dashboard. Play requires every update to be signed with the same upload key.
+
 ## 4. Accounts and listings
 
 - Apple Developer Program ($99/yr) and Google Play Console ($25 once).
