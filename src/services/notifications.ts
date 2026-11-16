@@ -124,7 +124,7 @@ export const NotificationService = {
           this.createAlert(
             nextPool,
             'case_locked',
-            `🆕 Case #${claimResult.fullCasesCount + 1} Opened: ${item.emoji} ${item.name}`,
+            `🔓 Case #${claimResult.fullCasesCount + 1} Opened: ${item.emoji} ${item.name}`,
             `Case #${claimResult.fullCasesCount} is full! Started Case #${claimResult.fullCasesCount + 1} (1/${item.caseSize} claimed).`
           )
         );
@@ -137,7 +137,7 @@ export const NotificationService = {
         this.createAlert(
           nextPool,
           'minimum_met',
-          `🎯 Wholesale Minimum Met ($${nextPool.minimumOrderAmount}+)!`,
+          `🎉 Wholesale Minimum Met ($${nextPool.minimumOrderAmount}+)!`,
           `${nextPool.title} reached $${nextSummary.combinedPoolTotal.toFixed(2)}! This week's wholesale delivery is officially a go.`
         )
       );
@@ -153,7 +153,7 @@ export const NotificationService = {
           this.createAlert(
             nextPool,
             'free_delivery_unlocked',
-            `🎉 FREE Wholesale Delivery Unlocked!`,
+            `🚚 FREE Wholesale Delivery Unlocked!`,
             `${nextPool.title} passed $${nextPool.freeDeliveryThreshold}! The $${nextPool.deliveryFee} supplier delivery fee is now $0.00 for all neighbors.`
           )
         );
@@ -167,7 +167,7 @@ export const NotificationService = {
           this.createAlert(
             nextPool,
             'free_delivery_near',
-            `🚚 Only $${nextSummary.amountNeededForFreeDelivery.toFixed(2)} Away from Free Delivery!`,
+            `⚡ Only $${nextSummary.amountNeededForFreeDelivery.toFixed(2)} Away from Free Delivery!`,
             `Add $${nextSummary.amountNeededForFreeDelivery.toFixed(2)} more to ${nextPool.title} to waive the $${nextPool.deliveryFee} delivery fee for everyone.`
           )
         );

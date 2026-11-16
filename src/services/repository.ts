@@ -192,6 +192,7 @@ export function sanitizePoolForCloud(pool: GroupBuyPool): GroupBuyPool {
 
 /**
  * Assemble and validate full rich domain state from Supabase table rows.
+ * Isolates per-pool validation so a malformed row in one pool does not break other healthy pools.
  */
 export function assembleCloudPoolsFromRows(
   poolRows: any[],
@@ -200,7 +201,10 @@ export function assembleCloudPoolsFromRows(
   claimRows: any[],
   messageRows: any[]
 ): GroupBuyPool[] {
-  const assembled: GroupBuyPool[] = poolRows.map((row: any) => {
+  const assembled: GroupBuyPool[] = [];
+  let firstValidationError: unknown = null;
+
+  for (const row of poolRows || []) {
     const poolParticipants: Participant[] = (participantRows || [])
       .filter((p: any) => p.pool_id === row.id)
       .map((p: any) => {
@@ -393,9 +397,17 @@ export function assembleCloudPoolsFromRows(
       messages: poolMessages,
     };
 
-    validatePool(pool);
-    return pool;
-  });
+    try {
+      validatePool(pool);
+      assembled.push(pool);
+    } catch (err) {
+      if (!firstValidationError) firstValidationError = err;
+    }
+  }
+
+  if (assembled.length === 0 && firstValidationError) {
+    throw firstValidationError;
+  }
 
   return assembled;
 }
@@ -1009,14 +1021,16 @@ export const PoolRepository = {
       return { poolId: String((data as any).poolId), state: 'synced' };
     } catch (err: any) {
       const classified = classifyCloudError(err);
-      await this.queuePendingCloudEdit({
-        id: `edit_${Date.now()}`,
-        poolId: cleanPool.id,
-        createdAt: new Date().toISOString(),
-        kind: 'create_pool',
-        poolSnapshot: cleanPool,
-        lastError: classified.message,
-      });
+      if (classified.state === 'network_unavailable') {
+        await this.queuePendingCloudEdit({
+          id: `edit_${Date.now()}`,
+          poolId: cleanPool.id,
+          createdAt: new Date().toISOString(),
+          kind: 'create_pool',
+          poolSnapshot: cleanPool,
+          lastError: classified.message,
+        });
+      }
       return { error: classified.message, state: classified.state };
     }
   },
@@ -1054,14 +1068,16 @@ export const PoolRepository = {
       return { rpcResult: data as AtomicClaimResult, state: 'synced' };
     } catch (err: any) {
       const classified = classifyCloudError(err);
-      await this.queuePendingCloudEdit({
-        id: `edit_${Date.now()}`,
-        poolId,
-        createdAt: new Date().toISOString(),
-        kind: 'action',
-        action: { type: 'claim', itemId, delta },
-        lastError: classified.message,
-      });
+      if (classified.state === 'network_unavailable') {
+        await this.queuePendingCloudEdit({
+          id: `edit_${Date.now()}`,
+          poolId,
+          createdAt: new Date().toISOString(),
+          kind: 'action',
+          action: { type: 'claim', itemId, delta },
+          lastError: classified.message,
+        });
+      }
       return { error: classified.message, state: classified.state };
     }
   },
@@ -1110,21 +1126,24 @@ export const PoolRepository = {
       return { state: 'synced' };
     } catch (err: any) {
       const classified = classifyCloudError(err);
-      await this.queuePendingCloudEdit({
-        id: `edit_${Date.now()}`,
-        poolId: pool.id,
-        createdAt: new Date().toISOString(),
-        kind: 'action',
-        action,
-        lastError: classified.message,
-      });
+      if (classified.state === 'network_unavailable') {
+        await this.queuePendingCloudEdit({
+          id: `edit_${Date.now()}`,
+          poolId: pool.id,
+          createdAt: new Date().toISOString(),
+          kind: 'action',
+          action,
+          lastError: classified.message,
+        });
+      }
       return { error: classified.message, state: classified.state };
     }
   },
 
   /**
    * Replays queued pending local edits against the cloud RPCs in order.
-   * Stops at the first failure so remaining edits are preserved without data loss.
+   * Stops at the first transient network failure so remaining edits are preserved without data loss,
+   * while dropping permanently rejected edits (e.g. auth_rejected / validation errors) so they cannot wedge the queue.
    */
   async flushPendingCloudEdits(
     currentPools: GroupBuyPool[],
@@ -1140,64 +1159,77 @@ export const PoolRepository = {
     if (edits.length === 0) return { remaining: 0 };
 
     const remainingEdits = [...edits];
+    let lastDroppedError: string | undefined;
+
     while (remainingEdits.length > 0) {
       const current = remainingEdits[0];
-      let err: string | undefined;
+      let rawErr: unknown;
 
-      if (current.kind === 'create_pool' && current.poolSnapshot) {
-        const { data, error } = await client.rpc('create_pool_with_catalog', {
-          p_pool: sanitizePoolForCloud(current.poolSnapshot),
-        });
-        if (error || !data) err = error?.message || 'Failed to replay pool creation.';
-      } else if (current.kind === 'join_invite' && current.joinCode) {
-        const { data, error } = await client.rpc('join_pool_by_invite', {
-          p_join_code: current.joinCode,
-          p_display_name: user.name,
-          p_neighborhood: user.neighborhood,
-          p_avatar_color: user.avatarColor,
-        });
-        if (error || !data) err = error?.message || 'Failed to replay invite join.';
-      } else if (current.kind === 'action' && current.action) {
-        if (current.action.type === 'claim') {
-          const { data, error } = await client.rpc('claim_item_share', {
-            p_pool_id: current.poolId,
-            p_item_id: current.action.itemId,
-            p_user_id: user.id,
-            p_user_name: user.name,
-            p_avatar_color: user.avatarColor,
+      try {
+        if (current.kind === 'create_pool' && current.poolSnapshot) {
+          const { data, error } = await client.rpc('create_pool_with_catalog', {
+            p_pool: sanitizePoolForCloud(current.poolSnapshot),
+          });
+          if (error || !data) rawErr = error || new Error('Failed to replay pool creation.');
+        } else if (current.kind === 'join_invite' && current.joinCode) {
+          const { data, error } = await client.rpc('join_pool_by_invite', {
+            p_join_code: current.joinCode,
+            p_display_name: user.name,
             p_neighborhood: user.neighborhood,
-            p_delta: current.action.delta,
+            p_avatar_color: user.avatarColor,
           });
-          if (error || !data) err = error?.message || 'Failed to replay claim delta.';
-        } else {
-          const targetPool = currentPools.find((p) => p.id === current.poolId);
-          let payload: Record<string, unknown> = { ...current.action };
-          if (current.action.type === 'paid' && targetPool) {
-            const due =
-              getParticipantBreakdowns(targetPool).find(
-                (b) => b.userId === (current.action as any).userId
-              )?.totalDue ?? 0;
-            payload = { ...current.action, settledAmount: due };
+          if (error || !data) rawErr = error || new Error('Failed to replay invite join.');
+        } else if (current.kind === 'action' && current.action) {
+          if (current.action.type === 'claim') {
+            const { data, error } = await client.rpc('claim_item_share', {
+              p_pool_id: current.poolId,
+              p_item_id: current.action.itemId,
+              p_user_id: user.id,
+              p_user_name: user.name,
+              p_avatar_color: user.avatarColor,
+              p_neighborhood: user.neighborhood,
+              p_delta: current.action.delta,
+            });
+            if (error || !data) rawErr = error || new Error('Failed to replay claim delta.');
+          } else {
+            const targetPool = currentPools.find((p) => p.id === current.poolId);
+            let payload: Record<string, unknown> = { ...current.action };
+            if (current.action.type === 'paid' && targetPool) {
+              const due =
+                getParticipantBreakdowns(targetPool).find(
+                  (b) => b.userId === (current.action as any).userId
+                )?.totalDue ?? 0;
+              payload = { ...current.action, settledAmount: due };
+            }
+            const { data, error } = await client.rpc('apply_pool_action_rpc', {
+              p_pool_id: current.poolId,
+              p_action: payload,
+            });
+            if (error || !data) rawErr = error || new Error('Failed to replay pool action.');
           }
-          const { data, error } = await client.rpc('apply_pool_action_rpc', {
-            p_pool_id: current.poolId,
-            p_action: payload,
-          });
-          if (error || !data) err = error?.message || 'Failed to replay pool action.';
         }
+      } catch (caught) {
+        rawErr = caught;
       }
 
-      if (err) {
-        remainingEdits[0] = { ...current, lastError: err };
+      if (rawErr) {
+        const classified = classifyCloudError(rawErr);
+        if (classified.state === 'network_unavailable') {
+          remainingEdits[0] = { ...current, lastError: classified.message };
+          await this.savePendingCloudEdits(remainingEdits);
+          return { remaining: remainingEdits.length, error: classified.message };
+        }
+        lastDroppedError = classified.message;
+        remainingEdits.shift();
         await this.savePendingCloudEdits(remainingEdits);
-        return { remaining: remainingEdits.length, error: err };
+        continue;
       }
 
       remainingEdits.shift();
       await this.savePendingCloudEdits(remainingEdits);
     }
 
-    return { remaining: 0 };
+    return lastDroppedError ? { remaining: 0, error: lastDroppedError } : { remaining: 0 };
   },
 
   async syncItemClaimsList(

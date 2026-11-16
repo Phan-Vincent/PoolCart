@@ -1,6 +1,6 @@
 // Applies supabase/schema.sql to a real (WASM) Postgres via PGlite with minimal
 // Supabase stubs (auth schema, roles, realtime publication), then exercises
-// public.delete_my_account() against seeded data. No network or server needed.
+// public.delete_my_account() and public.apply_pool_action_rpc() against seeded data.
 import { PGlite } from '@electric-sql/pglite';
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
@@ -64,6 +64,49 @@ const asUser = async (uid, fn) => {
   await db.exec(`select set_config('request.jwt.claim.sub', '${uid}', false)`);
   return fn();
 };
+const q = async (s) => (await db.query(s)).rows;
+
+// Verify Track 3: RPC validation and settlement invalidation parity on p2 before account deletion
+await asUser(C, async () => {
+  // Reject negative receipt fees and >2 decimal prices
+  await assert.rejects(
+    () => db.query(`select public.apply_pool_action_rpc('p2', '{"type":"receipt","trueUp":{"taxOrBagFee":-3}}'::jsonb)`),
+    /Receipt fees must be a non-negative amount/
+  );
+  await assert.rejects(
+    () => db.query(`select public.apply_pool_action_rpc('p2', '{"type":"price","itemId":"p2_item","price":4.567}'::jsonb)`),
+    /at most two decimal places/
+  );
+  // Reject malformed wishlist request
+  await assert.rejects(
+    () => db.query(`select public.apply_pool_action_rpc('p2', '{"type":"request","wish":{"title":"","targetCaseSize":4,"estimatedUnitPrice":5,"estimatedRetailPrice":6}}'::jsonb)`),
+    /Wishlist title is required/
+  );
+  await assert.rejects(
+    () => db.query(`select public.apply_pool_action_rpc('p2', '{"type":"request","wish":{"title":"Honey","targetCaseSize":1,"estimatedUnitPrice":5,"estimatedRetailPrice":6}}'::jsonb)`),
+    /between 2 and 1000/
+  );
+
+  // Valid wishlist request + promote with deterministic newItemId invalidates prior settlement state
+  await db.exec(`update public.pool_participants set paid_status = 'paid', settled_amount = 20, picked_up = true where pool_id = 'p2' and user_id = '${C}'`);
+  await db.query(`select public.apply_pool_action_rpc('p2', '{"type":"request","wish":{"id":"w_honey","title":"Honey","targetCaseSize":4,"estimatedUnitPrice":10,"estimatedRetailPrice":14}}'::jsonb)`);
+  await db.query(`select public.apply_pool_action_rpc('p2', '{"type":"promote","wishId":"w_honey","newItemId":"p2_honey_item"}'::jsonb)`);
+  const promoted = await q(`select id from public.catalog_items where id = 'p2_honey_item'`);
+  assert.equal(promoted.length, 1, 'promote uses caller-supplied newItemId');
+  const hostPart = (await q(`select paid_status, settled_amount, picked_up from public.pool_participants where pool_id = 'p2' and user_id = '${C}'`))[0];
+  assert.deepEqual(hostPart, { paid_status: 'pending', settled_amount: null, picked_up: false }, 'promote invalidates settlement state');
+
+  // Trim partial case on p2_honey_item removes the 1 remainder unit and keeps wishlist clean for deletion test
+  await db.exec(`update public.pool_participants set paid_status = 'paid', settled_amount = 20, picked_up = true where pool_id = 'p2' and user_id = '${C}'`);
+  await db.query(`select public.apply_pool_action_rpc('p2', '{"type":"trim","itemId":"p2_honey_item"}'::jsonb)`);
+  const hostAfterTrim = (await q(`select paid_status, settled_amount, picked_up from public.pool_participants where pool_id = 'p2' and user_id = '${C}'`))[0];
+  assert.deepEqual(hostAfterTrim, { paid_status: 'pending', settled_amount: null, picked_up: false }, 'trim invalidates settlement state');
+  await db.exec(`delete from public.catalog_items where id = 'p2_honey_item'`);
+  await db.exec(`update public.pools set wishlist = '[
+    {"id":"w1","requestedByUserId":"${B}","pledgedUserIds":["${C}"]},
+    {"id":"w2","requestedByUserId":"${C}","pledgedUserIds":["${B}","${C}"]}
+  ]'::jsonb where id = 'p2'`);
+});
 
 // Unauthenticated callers are rejected.
 await db.exec(`select set_config('request.jwt.claim.sub', '', false)`);
@@ -72,7 +115,6 @@ await assert.rejects(() => db.query('select public.delete_my_account()'), /Authe
 // Delete B (member of p1/p2/p3, host of nothing)
 const resB = await asUser(B, () => db.query('select public.delete_my_account() as r'));
 assert.equal(resB.rows[0].r.hostedPoolsDeleted, 0);
-const q = async (s) => (await db.query(s)).rows;
 assert.equal((await q(`select 1 from auth.users where id = '${B}'`)).length, 0, 'auth user removed');
 assert.equal((await q(`select 1 from public.user_profiles where user_id = '${B}'`)).length, 0, 'profile removed');
 assert.equal((await q(`select 1 from public.pool_messages where user_id = '${B}'`)).length, 0, 'messages removed');
@@ -107,4 +149,4 @@ const grants = await q(`select grantee from information_schema.role_routine_gran
   where routine_name = 'delete_my_account' and grantee in ('anon','authenticated','PUBLIC')`);
 assert.deepEqual(grants.map((g) => g.grantee).sort(), ['authenticated']);
 
-console.log('delete_my_account: all checks passed');
+console.log('delete_my_account and apply_pool_action_rpc: all checks passed');

@@ -292,11 +292,9 @@ export default function App() {
   );
 
   useEffect(() => {
-    let unsubscribeRealtime = () => {};
-
     const bootstrap = async () => {
       try {
-        const [savedUser, savedAlerts, savedPrefs, cfg, initialUrl] =
+        const [savedUser, savedAlerts, savedPrefs, _cfg, initialUrl] =
           await Promise.all([
             PoolRepository.loadActiveUser(),
             NotificationService.loadAlerts(),
@@ -311,12 +309,6 @@ export default function App() {
 
         const codeFromUrl = extractPoolCodeFromUrl(initialUrl);
         await refreshPools(undefined, codeFromUrl);
-
-        if (cfg.enabled) {
-          unsubscribeRealtime = PoolRepository.subscribeToRealtime((table) => {
-            refreshPools(table);
-          });
-        }
         setReady(true);
       } catch (error) {
         setStorageError(String(error));
@@ -333,10 +325,19 @@ export default function App() {
     });
 
     return () => {
-      unsubscribeRealtime();
       sub.remove();
     };
   }, [refreshPools]);
+
+  useEffect(() => {
+    if (!ready || !isCloudMode || !cloudAuthUser?.id) return;
+    const unsubscribeRealtime = PoolRepository.subscribeToRealtime((table) => {
+      refreshPools(table);
+    });
+    return () => {
+      unsubscribeRealtime();
+    };
+  }, [ready, isCloudMode, cloudAuthUser?.id, syncStatus.mode, refreshPools]);
 
   useEffect(() => {
     setSelectedCategory('All');
@@ -738,7 +739,7 @@ export default function App() {
     });
   };
   const handlePromoteWishlistToCatalog = async (wish: WishlistRequest) => {
-    await mutate({ type: 'promote', wishId: wish.id });
+    await mutate({ type: 'promote', wishId: wish.id, newItemId: newId('item') });
   };
   const handleUpdateItemActualPrice = async (
     itemId: string,

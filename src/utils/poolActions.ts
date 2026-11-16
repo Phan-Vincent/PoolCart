@@ -99,7 +99,7 @@ export type PoolAction =
   | { type: 'reorder'; receipt: PastOrderReceipt }
   | { type: 'pledge'; wishId: string }
   | { type: 'request'; wish: WishlistRequest }
-  | { type: 'promote'; wishId: string }
+  | { type: 'promote'; wishId: string; newItemId?: string }
   | { type: 'price'; itemId: string; price?: number }
   | { type: 'receipt'; trueUp: ReceiptTrueUp; prices?: { itemId: string; newPrice: number }[] }
   | { type: 'porch'; checkIn: PorchDropCheckIn }
@@ -168,7 +168,7 @@ export function applyPoolAction(previous: GroupBuyPool, user: Participant, actio
     }
     case 'request':
       ensureParticipant(user);
-      pool.wishlist = [{ ...action.wish, id: newId('wish'), poolId: pool.id, requestedByUserId: user.id, requestedByUserName: user.name, pledgedUserIds: [user.id], promotedToCatalog: false }, ...(pool.wishlist ?? [])];
+      pool.wishlist = [{ ...action.wish, id: action.wish.id || newId('wish'), poolId: pool.id, requestedByUserId: user.id, requestedByUserName: user.name, pledgedUserIds: [user.id], promotedToCatalog: false }, ...(pool.wishlist ?? [])];
       break;
     case 'promote': {
       const wish = pool.wishlist?.find((w) => w.id === action.wishId && !w.promotedToCatalog);
@@ -181,7 +181,7 @@ export function applyPoolAction(previous: GroupBuyPool, user: Participant, actio
         }
         return { userId: id, userName: participant.name, avatarColor: participant.avatarColor, quantity: 1 };
       });
-      pool.items.unshift({ id: newId('item'), name: wish.title, emoji: wish.emoji, category: wish.category, unitLabel: wish.suggestedUnitLabel, unitPrice: wish.estimatedUnitPrice, retailPrice: wish.estimatedRetailPrice, mode: 'case_split', caseSize: wish.targetCaseSize, claims });
+      pool.items.unshift({ id: action.newItemId || newId('item'), name: wish.title, emoji: wish.emoji, category: wish.category, unitLabel: wish.suggestedUnitLabel, unitPrice: wish.estimatedUnitPrice, retailPrice: wish.estimatedRetailPrice, mode: 'case_split', caseSize: wish.targetCaseSize, claims });
       wish.promotedToCatalog = true;
       break;
     }
