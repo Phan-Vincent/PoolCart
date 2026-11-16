@@ -133,6 +133,13 @@ function getOrCreateSupabaseClient(): SupabaseClient | null {
 export function classifyCloudError(err: unknown): {
   state: 'auth_rejected' | 'network_unavailable' | 'schema_or_query_error';
   message: string;
+  /**
+   * True only when retrying the same request can never succeed: a server-side
+   * validation rejection (P0001 / 22xxx / 23xxx), an explicit permission denial
+   * (42501), or a clear membership/host authorization message. Session/JWT,
+   * rate-limit, service-unavailable and unknown failures stay retryable.
+   */
+  permanent: boolean;
 } {
   const raw =
     typeof err === 'object' && err !== null && 'message' in err
@@ -147,8 +154,22 @@ export function classifyCloudError(err: unknown): {
       ? Number((err as { status: unknown }).status)
       : 0;
 
-  if (
+  const sessionError =
     status === 401 ||
+    code === 'PGRST301' ||
+    code === 'PGRST303' ||
+    /jwt|authentication required/i.test(raw);
+  const permanent = !sessionError && (
+    code === 'P0001' ||
+    /^22[0-9A-Z]{3}$/i.test(code) ||
+    /^23[0-9A-Z]{3}$/i.test(code) ||
+    code === '42501' ||
+    /only the pool host|only the host|not a member|access denied|forged identity|permission denied|row-level security/i.test(
+      raw
+    ));
+
+  if (
+    sessionError ||
     status === 403 ||
     code === '42501' ||
     code === 'PGRST301' ||
@@ -156,18 +177,18 @@ export function classifyCloudError(err: unknown): {
       raw
     )
   ) {
-    return { state: 'auth_rejected', message: raw };
+    return { state: 'auth_rejected', message: raw, permanent };
   }
 
   if (
-    /network|fetch failed|failed to fetch|offline|timed out|timeout|econnrefused|enotfound|socket|unreachable/i.test(
+    /network|fetch failed|failed to fetch|load failed|offline|timed out|timeout|econnrefused|enotfound|socket|unreachable/i.test(
       raw
     )
   ) {
-    return { state: 'network_unavailable', message: raw };
+    return { state: 'network_unavailable', message: raw, permanent };
   }
 
-  return { state: 'schema_or_query_error', message: raw };
+  return { state: 'schema_or_query_error', message: raw, permanent };
 }
 
 /**
@@ -190,18 +211,27 @@ export function sanitizePoolForCloud(pool: GroupBuyPool): GroupBuyPool {
   return copy;
 }
 
+export interface SkippedCloudPool {
+  poolId: string;
+  title: string;
+  error: string;
+}
+
 /**
  * Assemble and validate full rich domain state from Supabase table rows.
  * Isolates per-pool validation so a malformed row in one pool does not break other healthy pools.
+ * Returns the healthy pools plus a `skipped` record for every invalid row.
+ * Throws the first validation error when no pool survives validation.
  */
-export function assembleCloudPoolsFromRows(
+export function collectCloudPoolsFromRows(
   poolRows: any[],
   participantRows: any[],
   itemRows: any[],
   claimRows: any[],
   messageRows: any[]
-): GroupBuyPool[] {
+): { pools: GroupBuyPool[]; skipped: SkippedCloudPool[] } {
   const assembled: GroupBuyPool[] = [];
+  const skipped: SkippedCloudPool[] = [];
   let firstValidationError: unknown = null;
 
   for (const row of poolRows || []) {
@@ -402,6 +432,11 @@ export function assembleCloudPoolsFromRows(
       assembled.push(pool);
     } catch (err) {
       if (!firstValidationError) firstValidationError = err;
+      skipped.push({
+        poolId: row.id === null || row.id === undefined ? '' : String(row.id),
+        title: row.title ? String(row.title) : 'Untitled pool',
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -409,7 +444,27 @@ export function assembleCloudPoolsFromRows(
     throw firstValidationError;
   }
 
-  return assembled;
+  return { pools: assembled, skipped };
+}
+
+/**
+ * Backwards-compatible single-array collector. Healthy pools are returned;
+ * throws the first validation error when every row is invalid.
+ */
+export function assembleCloudPoolsFromRows(
+  poolRows: any[],
+  participantRows: any[],
+  itemRows: any[],
+  claimRows: any[],
+  messageRows: any[]
+): GroupBuyPool[] {
+  return collectCloudPoolsFromRows(
+    poolRows,
+    participantRows,
+    itemRows,
+    claimRows,
+    messageRows
+  ).pools;
 }
 
 /**
@@ -844,6 +899,7 @@ export const PoolRepository = {
     cloudState: CloudLoadState;
     authenticatedUser?: Participant | null;
     pendingEditsCount: number;
+    skipped?: SkippedCloudPool[];
     error?: string;
   }> {
     const pendingEdits = await this.loadPendingCloudEdits();
@@ -890,7 +946,7 @@ export const PoolRepository = {
           };
         }
 
-        const assembled = assembleCloudPoolsFromRows(
+        const { pools: assembled, skipped } = collectCloudPoolsFromRows(
           poolsRes.data,
           partsRes.data || [],
           itemsRes.data || [],
@@ -908,6 +964,13 @@ export const PoolRepository = {
           cloudState: 'synced',
           authenticatedUser: cloudUser,
           pendingEditsCount: pendingEdits.length,
+          skipped,
+          error:
+            skipped.length > 0
+              ? `Skipped ${skipped.length} invalid cloud pool(s): ${skipped
+                  .map((s) => `"${s.title}" — ${s.error}`)
+                  .join('; ')}`
+              : undefined,
         };
       } catch (err: any) {
         const classified = classifyCloudError(err);
@@ -956,14 +1019,24 @@ export const PoolRepository = {
   async joinCloudPoolByInvite(
     joinCode: string,
     user: Participant
-  ): Promise<{ poolId?: string; joinCode?: string; error?: string; state?: CloudLoadState }> {
+  ): Promise<{
+    poolId?: string;
+    joinCode?: string;
+    error?: string;
+    state?: CloudLoadState;
+    queued: boolean;
+  }> {
     const client = getOrCreateSupabaseClient();
     if (!client) {
-      return { error: 'Cloud mode is not enabled.', state: 'local_mode' };
+      return { error: 'Cloud mode is not enabled.', state: 'local_mode', queued: false };
     }
     const cleanCode = joinCode.trim().toUpperCase();
     if (!cleanCode) {
-      return { error: 'Enter a valid invite code.', state: 'schema_or_query_error' };
+      return {
+        error: 'Enter a valid invite code.',
+        state: 'schema_or_query_error',
+        queued: false,
+      };
     }
 
     try {
@@ -982,10 +1055,12 @@ export const PoolRepository = {
         poolId: String((data as any).poolId),
         joinCode: String((data as any).joinCode || cleanCode),
         state: 'synced',
+        queued: false,
       };
     } catch (err: any) {
       const classified = classifyCloudError(err);
-      if (classified.state === 'network_unavailable') {
+      let queued = false;
+      if (!classified.permanent) {
         await this.queuePendingCloudEdit({
           id: `edit_${Date.now()}`,
           poolId: cleanCode,
@@ -994,8 +1069,9 @@ export const PoolRepository = {
           joinCode: cleanCode,
           lastError: classified.message,
         });
+        queued = true;
       }
-      return { error: classified.message, state: classified.state };
+      return { error: classified.message, state: classified.state, queued };
     }
   },
 
@@ -1005,9 +1081,14 @@ export const PoolRepository = {
    */
   async createCloudPool(
     pool: GroupBuyPool
-  ): Promise<{ poolId?: string; error?: string; state?: CloudLoadState }> {
+  ): Promise<{
+    poolId?: string;
+    error?: string;
+    state?: CloudLoadState;
+    queued: boolean;
+  }> {
     const client = getOrCreateSupabaseClient();
-    if (!client) return { state: 'local_mode' };
+    if (!client) return { state: 'local_mode', queued: false };
 
     const cleanPool = sanitizePoolForCloud(pool);
     try {
@@ -1018,10 +1099,11 @@ export const PoolRepository = {
       if (!data || typeof data !== 'object' || !(data as any).poolId) {
         throw new Error('Create pool RPC returned no pool ID.');
       }
-      return { poolId: String((data as any).poolId), state: 'synced' };
+      return { poolId: String((data as any).poolId), state: 'synced', queued: false };
     } catch (err: any) {
       const classified = classifyCloudError(err);
-      if (classified.state === 'network_unavailable') {
+      let queued = false;
+      if (!classified.permanent) {
         await this.queuePendingCloudEdit({
           id: `edit_${Date.now()}`,
           poolId: cleanPool.id,
@@ -1030,8 +1112,9 @@ export const PoolRepository = {
           poolSnapshot: cleanPool,
           lastError: classified.message,
         });
+        queued = true;
       }
-      return { error: classified.message, state: classified.state };
+      return { error: classified.message, state: classified.state, queued };
     }
   },
 
@@ -1045,9 +1128,14 @@ export const PoolRepository = {
     user: Participant,
     delta: number,
     _fallbackQuantity?: number
-  ): Promise<{ rpcResult?: AtomicClaimResult; error?: string; state?: CloudLoadState }> {
+  ): Promise<{
+    rpcResult?: AtomicClaimResult;
+    error?: string;
+    state?: CloudLoadState;
+    queued: boolean;
+  }> {
     const client = getOrCreateSupabaseClient();
-    if (!client) return { state: 'local_mode' };
+    if (!client) return { state: 'local_mode', queued: false };
 
     try {
       const { data, error } = await client.rpc('claim_item_share', {
@@ -1065,10 +1153,11 @@ export const PoolRepository = {
         throw new Error('Claim RPC returned no result; no fallback write was attempted.');
       }
 
-      return { rpcResult: data as AtomicClaimResult, state: 'synced' };
+      return { rpcResult: data as AtomicClaimResult, state: 'synced', queued: false };
     } catch (err: any) {
       const classified = classifyCloudError(err);
-      if (classified.state === 'network_unavailable') {
+      let queued = false;
+      if (!classified.permanent) {
         await this.queuePendingCloudEdit({
           id: `edit_${Date.now()}`,
           poolId,
@@ -1077,8 +1166,9 @@ export const PoolRepository = {
           action: { type: 'claim', itemId, delta },
           lastError: classified.message,
         });
+        queued = true;
       }
-      return { error: classified.message, state: classified.state };
+      return { error: classified.message, state: classified.state, queued };
     }
   },
 
@@ -1090,9 +1180,14 @@ export const PoolRepository = {
     pool: GroupBuyPool,
     user: Participant,
     action: PoolAction
-  ): Promise<{ rpcResult?: AtomicClaimResult; error?: string; state?: CloudLoadState }> {
+  ): Promise<{
+    rpcResult?: AtomicClaimResult;
+    error?: string;
+    state?: CloudLoadState;
+    queued: boolean;
+  }> {
     const client = getOrCreateSupabaseClient();
-    if (!client) return { state: 'local_mode' };
+    if (!client) return { state: 'local_mode', queued: false };
 
     if (action.type === 'claim') {
       return this.syncAtomicClaimDelta(pool.id, action.itemId, user, action.delta);
@@ -1103,6 +1198,7 @@ export const PoolRepository = {
         error:
           'Simulated card holds are confined to local demo mode and are never sent to cloud payment records.',
         state: 'auth_rejected',
+        queued: false,
       };
     }
 
@@ -1123,10 +1219,11 @@ export const PoolRepository = {
       if (!data) {
         throw new Error('Pool action RPC returned no confirmation; no fallback write was attempted.');
       }
-      return { state: 'synced' };
+      return { state: 'synced', queued: false };
     } catch (err: any) {
       const classified = classifyCloudError(err);
-      if (classified.state === 'network_unavailable') {
+      let queued = false;
+      if (!classified.permanent) {
         await this.queuePendingCloudEdit({
           id: `edit_${Date.now()}`,
           poolId: pool.id,
@@ -1135,15 +1232,18 @@ export const PoolRepository = {
           action,
           lastError: classified.message,
         });
+        queued = true;
       }
-      return { error: classified.message, state: classified.state };
+      return { error: classified.message, state: classified.state, queued };
     }
   },
 
   /**
    * Replays queued pending local edits against the cloud RPCs in order.
-   * Stops at the first transient network failure so remaining edits are preserved without data loss,
-   * while dropping permanently rejected edits (e.g. auth_rejected / validation errors) so they cannot wedge the queue.
+   * Stops and retains the current edit plus every remaining edit on any
+   * nonpermanent failure (network, session/JWT, service unavailable, rate
+   * limit, unknown), so nothing is lost. Only permanently rejected edits are
+   * dropped, after which the queue continues and the dropped reasons are reported.
    */
   async flushPendingCloudEdits(
     currentPools: GroupBuyPool[],
@@ -1159,7 +1259,7 @@ export const PoolRepository = {
     if (edits.length === 0) return { remaining: 0 };
 
     const remainingEdits = [...edits];
-    let lastDroppedError: string | undefined;
+    const droppedErrors: string[] = [];
 
     while (remainingEdits.length > 0) {
       const current = remainingEdits[0];
@@ -1214,12 +1314,18 @@ export const PoolRepository = {
 
       if (rawErr) {
         const classified = classifyCloudError(rawErr);
-        if (classified.state === 'network_unavailable') {
+        if (!classified.permanent) {
           remainingEdits[0] = { ...current, lastError: classified.message };
           await this.savePendingCloudEdits(remainingEdits);
-          return { remaining: remainingEdits.length, error: classified.message };
+          const droppedNote = droppedErrors.length
+            ? ` (${droppedErrors.length} permanently rejected edit(s) were dropped: ${droppedErrors.join('; ')})`
+            : '';
+          return {
+            remaining: remainingEdits.length,
+            error: `${classified.message}${droppedNote}`,
+          };
         }
-        lastDroppedError = classified.message;
+        droppedErrors.push(`${current.kind} for pool ${current.poolId}: ${classified.message}`);
         remainingEdits.shift();
         await this.savePendingCloudEdits(remainingEdits);
         continue;
@@ -1229,7 +1335,12 @@ export const PoolRepository = {
       await this.savePendingCloudEdits(remainingEdits);
     }
 
-    return lastDroppedError ? { remaining: 0, error: lastDroppedError } : { remaining: 0 };
+    return droppedErrors.length > 0
+      ? {
+          remaining: 0,
+          error: `Dropped ${droppedErrors.length} permanently rejected edit(s): ${droppedErrors.join('; ')}`,
+        }
+      : { remaining: 0 };
   },
 
   async syncItemClaimsList(

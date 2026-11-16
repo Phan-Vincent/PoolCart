@@ -36,6 +36,8 @@ const {
   PoolRepository,
   CLOUD_SYNC_AVAILABLE,
   assembleCloudPoolsFromRows,
+  collectCloudPoolsFromRows,
+  classifyCloudError,
   sanitizePoolForCloud,
 } = require('../src/services/repository.ts');
 const {createWriteQueue} = require('../src/services/storageQueue.ts');
@@ -1139,6 +1141,192 @@ test('SQL schema grants self-service account deletion to signed-in users only',(
   assert(fn.includes('delete from auth.users where id = v_uid::uuid'));
   assert(sql.includes('revoke execute on function public.delete_my_account() from public, anon;'));
   assert(sql.includes('grant execute on function public.delete_my_account() to authenticated;'));
+});
+
+test('Cloud error classification treats only permanent server rejections as permanent',()=>{
+  const cases=[
+    [{message:'Service Unavailable',code:'PGRST503'},false],
+    [{message:'Too Many Requests',code:'PGRST429'},false],
+    [{message:'JWT expired',code:'PGRST301'},false],
+    [{message:'JWT expired',code:'PGRST303'},false],
+    [{message:'Permission denied: JWT expired',code:'PGRST303'},false],
+    [{message:'Permission denied',status:401},false],
+    [{message:'Authentication required',status:401},false],
+    [{message:'Something unexpected happened'},false],
+    [{message:'Pool not found.',code:'P0001'},true],
+    [{message:'invalid input syntax for type integer',code:'22P02'},true],
+    [{message:'duplicate key value violates unique constraint',code:'23505'},true],
+    [{message:'permission denied for table pools',code:'42501'},true],
+    [{message:'Access denied: you are not a member of this pool.'},true],
+    [{message:'Only the pool host can perform this action.'},true],
+    [{message:'Forged identity rejected: caller mismatch.'},true],
+    [{message:'new row violates row-level security policy'},true],
+  ];
+  for(const [error,expected] of cases) assert.equal(classifyCloudError(error).permanent,expected,JSON.stringify(error));
+  assert.equal(classifyCloudError({message:'TypeError: Load failed'}).state,'network_unavailable');
+  assert.equal(classifyCloudError({message:'Load failed'}).permanent,false);
+  assert.equal(classifyCloudError({message:'JWT expired',code:'PGRST301'}).state,'auth_rejected');
+  assert.equal(classifyCloudError({message:'Service Unavailable'}).state,'schema_or_query_error');
+  assert.equal(classifyCloudError({message:'Pool not found.',code:'P0001'}).state,'schema_or_query_error');
+});
+
+test('Pending queue retains every edit on retryable failures and drops only permanently rejected edits',async()=>{
+  const cfg={url:'https://test.supabase.co',anonKey:'anon-test',enabled:true};
+  const user={...member};
+  const edits=prefix=>[1,2,3].map(n=>({id:`${prefix}_${n}`,poolId:'p',createdAt:'now',kind:'action',action:{type:'lock'}}));
+
+  // Service Unavailable and JWT/session failures are retryable: all 3 edits stay queued.
+  for(const error of [{message:'Service Unavailable',code:'PGRST503'},{message:'JWT expired',code:'PGRST303'}]){
+    PoolRepository.setTestSupabaseClient({rpc:async()=>({data:null,error})},cfg);
+    await PoolRepository.savePendingCloudEdits(edits('retry'));
+    const res=await PoolRepository.flushPendingCloudEdits([pool()],user);
+    assert.equal(res.remaining,3,`${error.message} must retain every edit`);
+    assert.match(res.error,new RegExp(error.message));
+    const pending=await PoolRepository.loadPendingCloudEdits();
+    assert.equal(pending.length,3);
+    assert.match(pending[0].lastError,new RegExp(error.message));
+  }
+
+  // First edit is permanently rejected (raise exception => P0001); the next two succeed.
+  let calls=0;
+  PoolRepository.setTestSupabaseClient({rpc:async()=>{
+    calls++;
+    return calls===1
+      ? {data:null,error:{message:'Pool not found.',code:'P0001'}}
+      : {data:{ok:true},error:null};
+  }},cfg);
+  await PoolRepository.savePendingCloudEdits(edits('drop'));
+  const res=await PoolRepository.flushPendingCloudEdits([pool()],user);
+  assert.equal(res.remaining,0);
+  assert.equal(calls,3,'A permanent rejection must not block the edits after it');
+  assert.match(res.error,/Dropped 1/);
+  assert.match(res.error,/Pool not found/);
+  assert.equal((await PoolRepository.loadPendingCloudEdits()).length,0);
+
+  PoolRepository.setTestSupabaseClient(null,{url:'',anonKey:'',enabled:false});
+  await PoolRepository.clearPendingCloudEdits();
+});
+
+test('First-attempt cloud calls return queued and queue only retryable failures',async()=>{
+  const cfg={url:'https://test.supabase.co',anonKey:'anon-test',enabled:true};
+  const user={...member};
+  const attempts=[
+    ['joinCloudPoolByInvite',()=>PoolRepository.joinCloudPoolByInvite('CODE-1',user)],
+    ['createCloudPool',()=>PoolRepository.createCloudPool(pool())],
+    ['syncAtomicClaimDelta',()=>PoolRepository.syncAtomicClaimDelta('p','i',user,1)],
+    ['syncCloudPoolAction',()=>PoolRepository.syncCloudPoolAction(pool(),user,{type:'lock'})],
+  ];
+  for(const [name,invoke] of attempts){
+    await PoolRepository.clearPendingCloudEdits();
+    PoolRepository.setTestSupabaseClient({rpc:async()=>({data:null,error:{message:'Pool not found.',code:'P0001'}})},cfg);
+    let res=await invoke();
+    assert.equal(res.error!==undefined,true,`${name} must report the permanent rejection`);
+    assert.equal(res.queued,false,`${name} must not queue a permanent rejection`);
+    assert.equal((await PoolRepository.loadPendingCloudEdits()).length,0,`${name} must leave the queue empty`);
+
+    PoolRepository.setTestSupabaseClient({rpc:async()=>({data:null,error:{message:'Service Unavailable',code:'PGRST503'}})},cfg);
+    res=await invoke();
+    assert.equal(res.queued,true,`${name} must queue a retryable failure`);
+    assert.equal((await PoolRepository.loadPendingCloudEdits()).length,1,`${name} must queue exactly one edit`);
+  }
+  PoolRepository.setTestSupabaseClient(null,{url:'',anonKey:'',enabled:false});
+  await PoolRepository.clearPendingCloudEdits();
+});
+
+test('Mixed cloud rows keep healthy pools and report skipped pool names and reasons',async()=>{
+  const validRow={id:'p_valid',join_code:'VALID-1',title:'Valid Pool',supplier_name:'Supplier',supplier_badge:'Direct',category:'Produce',host_user_id:'u1',host_name:'Host',neighborhood:'Demo',pickup_address:'123 Main',pickup_window:'Sat',cutoff_time:'Fri',minimum_order_amount:100,delivery_fee:10,free_delivery_threshold:150,status:'open'};
+  const malformedRow={...validRow,id:'p_bad',join_code:'BAD-1',title:'Broken Pool',minimum_order_amount:-50};
+  const parts=[
+    {pool_id:'p_valid',user_id:'u1',user_name:'Host',is_host:true,paid_status:'pending'},
+    {pool_id:'p_bad',user_id:'u1',user_name:'Host',is_host:true,paid_status:'pending'},
+  ];
+  const collected=collectCloudPoolsFromRows([malformedRow,validRow],parts,[],[],[]);
+  assert.deepEqual(collected.pools.map(p=>p.id),['p_valid']);
+  assert.equal(collected.skipped.length,1);
+  assert.equal(collected.skipped[0].poolId,'p_bad');
+  assert.equal(collected.skipped[0].title,'Broken Pool');
+  assert.match(collected.skipped[0].error,/Minimum order/);
+  assert.deepEqual(assembleCloudPoolsFromRows([validRow],parts,[],[],[]).map(p=>p.id),['p_valid']);
+  assert.throws(()=>collectCloudPoolsFromRows([malformedRow],parts,[],[],[]),/Minimum order/);
+
+  const tableRows={pools:[malformedRow,validRow],pool_participants:parts,catalog_items:[],item_claims:[],pool_messages:[]};
+  const client={
+    auth:{getSession:async()=>({data:{session:{user:{id:'u1',email:'host@example.edu',user_metadata:{}}}},error:null})},
+    rpc:async(fn)=>({data:fn==='upsert_my_profile'?{id:'u1',name:'Host',neighborhood:'Demo',avatarColor:'#0D9488'}:{ok:true},error:null}),
+    from:(table)=>({
+      select:()=>{
+        const result={data:tableRows[table]||[],error:null};
+        return {order:async()=>result,then:(resolve,reject)=>Promise.resolve(result).then(resolve,reject)};
+      },
+    }),
+  };
+  PoolRepository.setTestSupabaseClient(client,{url:'https://test.supabase.co',anonKey:'anon-test',enabled:true});
+  await PoolRepository.clearPendingCloudEdits();
+  const loaded=await PoolRepository.loadPools();
+  assert.equal(loaded.cloudState,'synced');
+  assert.deepEqual(loaded.pools.map(p=>p.id),['p_valid']);
+  assert.equal(loaded.skipped.length,1);
+  assert.equal(loaded.skipped[0].title,'Broken Pool');
+  assert.match(loaded.error,/Broken Pool/);
+  assert.match(loaded.error,/Minimum order/);
+  PoolRepository.setTestSupabaseClient(null,{url:'',anonKey:'',enabled:false});
+  storage.delete('@poolcart_pools_v3');
+  storage.delete('@poolcart_pending_cloud_edits_v1');
+});
+
+// Exercise the actual App callbacks without starting Expo or rendering native UI.
+test('App rolls back rejected edits and creates local pools only for queued failures',async()=>{
+  const appFile=ts.createSourceFile('App.tsx',fs.readFileSync(path.join(root,'App.tsx'),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+  function callback(name,context){
+    let initializer;
+    function visit(node){
+      if(ts.isVariableDeclaration(node)&&node.name.getText(appFile)===name) initializer=node.initializer;
+      ts.forEachChild(node,visit);
+    }
+    visit(appFile);
+    assert(initializer,`Missing App callback ${name}`);
+    const code=ts.transpileModule(`const candidate = ${initializer.getText(appFile)};`,{compilerOptions:{target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.CommonJS}}).outputText;
+    return new Function(...Object.keys(context),`${code}\nreturn candidate;`)(...Object.values(context));
+  }
+  for(const queued of [false,true]){
+    const original=pool();
+    const poolsRef={current:[original]};
+    const messages=[];const saves=[];let status={};let displayed;let refreshes=0;
+    const context={ready:true,poolsRef,selectedPoolId:original.id,isCloudMode:true,cloudAuthUser:host,activeUser:host,
+      applyPoolAction:domain.applyPoolAction,normalizePools:domain.normalizePools,
+      PoolRepository:{
+        saveLocalPools:async list=>{saves.push(JSON.parse(JSON.stringify(list)));},
+        syncCloudPoolAction:async()=>({error:'Server reason',state:'schema_or_query_error',queued}),
+        createCloudPool:async()=>({error:'Server reason',state:'schema_or_query_error',queued}),
+        loadPendingCloudEdits:async()=>queued?[{id:'queued'}]:[],
+      },
+      setPoolState:list=>{displayed=list;},setStorageError:()=>{},setActionError:()=>{},
+      setSyncStatus:fn=>{status=fn(status);},reportError:error=>messages.push(error.message),
+      refreshPools:async()=>{refreshes++;},
+      setSelectedPoolId:()=>{},setSelectedCategory:()=>{},setSearchQuery:()=>{},setActiveTab:()=>{},setRerunSource:()=>{},
+    };
+    context.setPools=callback('setPools',context);
+    const result=await callback('mutate',context)({type:'claim',itemId:'i',delta:1});
+    await Promise.resolve();
+    assert.equal(result.cloudRejected,true,'Rejected claims must suppress milestone alerts');
+    assert.equal(refreshes,queued?0:1,'A rejected edit reloads server state once; a queued edit must not refresh');
+    const expected=queued?domain.applyPoolAction(original,host,{type:'claim',itemId:'i',delta:1}):original;
+    assert.deepEqual(displayed,[expected]);
+    assert.deepEqual(poolsRef.current,[expected]);
+    assert.deepEqual(saves.at(-1),JSON.parse(JSON.stringify([expected])),'The cache must match displayed state');
+    assert.equal(status.pendingLocalEditsCount,queued?1:0);
+    assert.match(status.label,queued?/queued/:/not saved/);
+    assert.match(messages.at(-1),queued?/queued/:/not saved/);
+    assert.match(messages.at(-1),/Server reason/);
+
+    poolsRef.current=[original];saves.length=0;messages.length=0;
+    await callback('handleCreatePool',context)({...pool([0,0]),id:'new_pool',joinCode:'NEW-POOL'});
+    assert.equal(poolsRef.current.length,queued?2:1);
+    assert.equal(saves.length,queued?1:0,'Rejected creation must not enter local storage');
+    assert.match(status.label,queued?/queued/:/not saved/);
+    assert.match(messages.at(-1),queued?/queued/:/not saved/);
+    assert.match(messages.at(-1),/Server reason/);
+  }
 });
 
 require('./ui.cjs')(test, {assert, pool, finalized, host, member, initialPools: INITIAL_POOLS, ts});

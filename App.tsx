@@ -99,6 +99,8 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [storageError, setStorageError] = useState('');
   const [actionError, setActionError] = useState('');
+  const [cloudWarnings, setCloudWarnings] = useState<string[]>([]);
+  const reportedSkippedSignatureRef = useRef('');
   const [paymentConfirmation, setPaymentConfirmation] = useState<{
     poolId: string;
     userId: string;
@@ -189,10 +191,21 @@ export default function App() {
         cloudState,
         authenticatedUser,
         pendingEditsCount,
+        skipped,
         error,
       } = await PoolRepository.loadPools();
 
       setCloudAuthUser(authenticatedUser ?? null);
+
+      // Report newly changed skipped-pool warnings only; realtime refreshes that
+      // return the same invalid rows must not duplicate the warning.
+      const skippedSignature = (skipped ?? [])
+        .map((s) => `${s.poolId}|${s.title}|${s.error}`)
+        .join('||');
+      if (skippedSignature !== reportedSkippedSignatureRef.current) {
+        reportedSkippedSignatureRef.current = skippedSignature;
+        setCloudWarnings((skipped ?? []).map((s) => `${s.title}: ${s.error}`));
+      }
 
       if (cloudState === 'empty_cloud' || (HOSTED_BUILD && !authenticatedUser)) {
         poolsRef.current = [];
@@ -224,7 +237,9 @@ export default function App() {
             'Cloud connected (0 joined pools) — join by invite code or host a new pool',
           synced: 'Supabase Cloud Connected (Authenticated Member Sync)',
           auth_rejected:
-            'Cloud authorization rejected — local changes preserved on device',
+            pendingEditsCount > 0
+              ? 'Cloud authorization unavailable — pending edits queued on device'
+              : 'Cloud authorization unavailable — no pending edits queued',
           network_unavailable:
             'Cloud network unavailable — offline local fallback active',
           schema_or_query_error:
@@ -294,7 +309,7 @@ export default function App() {
   useEffect(() => {
     const bootstrap = async () => {
       try {
-        const [savedUser, savedAlerts, savedPrefs, _cfg, initialUrl] =
+        const [savedUser, savedAlerts, savedPrefs, , initialUrl] =
           await Promise.all([
             PoolRepository.loadActiveUser(),
             NotificationService.loadAlerts(),
@@ -406,29 +421,46 @@ export default function App() {
         );
         if (syncRes.error) {
           const pending = await PoolRepository.loadPendingCloudEdits();
+          const queued = Boolean(syncRes.queued);
           setSyncStatus((prev) => ({
             ...prev,
             mode:
-              syncRes.state === 'auth_rejected'
-                ? 'supabase_auth_rejected'
-                : syncRes.state === 'network_unavailable'
+              syncRes.state === 'network_unavailable'
                 ? 'supabase_offline'
+                : syncRes.state === 'auth_rejected'
+                ? 'supabase_auth_rejected'
                 : 'supabase_error',
-            label:
-              syncRes.state === 'auth_rejected'
-                ? 'Cloud authorization rejected — local edit preserved as unsaved'
-                : syncRes.state === 'network_unavailable'
-                ? 'Cloud offline — local edit queued on device'
-                : 'Cloud sync error — local edit preserved on device',
+            label: queued
+              ? syncRes.state === 'network_unavailable'
+                ? 'Cloud offline — local edit queued on device; it will retry'
+                : syncRes.state === 'auth_rejected'
+                ? 'Cloud session rejected — local edit queued on device; sign in again to retry'
+                : 'Cloud unavailable — local edit queued on device; it will retry'
+              : 'Cloud rejected this change — it was not saved and was rolled back',
             errorMessage: syncRes.error,
             pendingLocalEditsCount: pending.length,
           }));
+          if (queued) {
+            reportError(
+              new Error(
+                `Cloud could not save this change yet (${syncRes.error}). It is queued on this device. Use Retry Pending Cloud Edits on the Sync tab to retry.`
+              )
+            );
+            return { pool: next, cloudRejected: true };
+          }
+          // Permanent rejection: undo the optimistic state and its cached copy.
+          setPools(
+            poolsRef.current.map((p) => (p.id === current.id ? current : p))
+          );
           reportError(
             new Error(
-              `Cloud rejected or could not save this change (${syncRes.error}). Your pending edit is preserved locally on this device.`
+              `Cloud rejected this change (${syncRes.error}). It was not saved, and the change was rolled back on this device.`
             )
           );
-          return { pool: next, cloudRejected: true };
+          // The server answered, so reload its state: the pre-action snapshot
+          // may be older than a realtime refresh that landed during the call.
+          await refreshPools().catch((error) => setStorageError(String(error)));
+          return { pool: null, cloudRejected: true };
         }
         await refreshPools();
       }
@@ -872,14 +904,36 @@ export default function App() {
         };
         const res = await PoolRepository.createCloudPool(cloudPool);
         if (res.error) {
-          const next = normalizePools([cloudPool, ...poolsRef.current]);
-          setPools(next);
-          setSelectedPoolId(cloudPool.id);
-          reportError(
-            new Error(
-              `Cloud pool creation could not complete (${res.error}). Preserved locally as a pending edit.`
-            )
-          );
+          const pending = await PoolRepository.loadPendingCloudEdits();
+          setSyncStatus((prev) => ({
+            ...prev,
+            mode: res.state === 'network_unavailable'
+              ? 'supabase_offline'
+              : res.state === 'auth_rejected'
+              ? 'supabase_auth_rejected'
+              : 'supabase_error',
+            label: res.queued
+              ? 'Cloud pool creation queued on device — retry from the Sync tab'
+              : 'Cloud pool creation rejected — the pool was not saved',
+            errorMessage: res.error,
+            pendingLocalEditsCount: pending.length,
+          }));
+          if (res.queued) {
+            const next = normalizePools([cloudPool, ...poolsRef.current]);
+            setPools(next);
+            setSelectedPoolId(cloudPool.id);
+            reportError(
+              new Error(
+                `Cloud pool creation is queued on this device (${res.error}) and will retry. It is not visible to other members until it syncs.`
+              )
+            );
+          } else {
+            reportError(
+              new Error(
+                `Cloud pool creation was rejected (${res.error}). The pool was not saved.`
+              )
+            );
+          }
           return;
         }
         await refreshPools();
@@ -1083,6 +1137,20 @@ export default function App() {
             <Text>Changes are not saved: {storageError}</Text>
             <TouchableOpacity onPress={() => setPools(poolsRef.current)}>
               <Text>Retry saving pools</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+        {cloudWarnings.length > 0 && (
+          <View style={{ padding: 10, backgroundColor: '#FEF3C7' }}>
+            <Text>
+              Some cloud pools could not be loaded and were skipped. Healthy
+              pools are still shown and synced:
+            </Text>
+            {cloudWarnings.map((warning) => (
+              <Text key={warning}>• {warning}</Text>
+            ))}
+            <TouchableOpacity onPress={() => setCloudWarnings([])}>
+              <Text>Dismiss</Text>
             </TouchableOpacity>
           </View>
         )}
