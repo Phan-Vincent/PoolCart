@@ -7,7 +7,7 @@ Code-side blockers are handled in the repo: icons and splash, a hosted build mod
 - Project `poolcart-prod`, ref `xvfrmivhkrlpodwsadxc`, region us-west-1, org PoolCart (free plan).
 - `EXPO_PUBLIC_SUPABASE_URL` = `https://xvfrmivhkrlpodwsadxc.supabase.co`
 - `EXPO_PUBLIC_SUPABASE_ANON_KEY` = the legacy **anon** key from Project Settings → API Keys. It's public by design (row-level security and server-side checks protect the data), but it's left out of this file so it can be rotated.
-- `supabase/schema.sql` applied as migrations `poolcart_01`–`05`. The live function sources match the repo file exactly (checked by checksum). `delete_my_account` and a host → join → claim → outsider-blocked flow were exercised live as the `authenticated` role, then cleaned up.
+- `supabase/schema.sql` applied as migrations `poolcart_01`–`06`. `poolcart_06_catalog_item_validation` (2026-11-16) added the shared catalog item validator and the updated `create_pool_with_catalog` and `apply_pool_action_rpc`. The live function sources match the repo file exactly (checked by checksum). `delete_my_account` and a host → join → claim → outsider-blocked flow were exercised live as the `authenticated` role, then cleaned up.
 - Advisors: performance clean. The remaining security notes list the RPCs signed-in users are meant to call.
 
 Still to do in the dashboard:
