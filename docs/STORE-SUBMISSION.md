@@ -48,12 +48,128 @@ Builds without the two Supabase variables run as the local demo, so check that t
 - **Android:** EAS-managed upload keystore. Production `.aab` 1.0.0 (2) is built but not yet uploaded; the first upload goes through Play Console → Internal testing by hand. `eas build -p android --profile preview` makes a sideloadable `.apk` against the production backend.
 - **Don't delete** the keystore or certificates in the Expo dashboard. Play requires every update to be signed with the same upload key.
 
-## 4. Accounts and listings
+## 4. Accounts, reviewer demo pool, and store review notes
 
 - Apple Developer Program ($99/yr) and Google Play Console ($25 once).
 - Create the app records with bundle ID / package `com.poolcart.grocerygroupbuy`.
 - Screenshots: iPhone 6.9" and 6.5" (iPad not needed; `supportsTablet` is false) and Android phone.
-- **Reviewer account**: create a confirmed account in the production project, host one sample pool with a couple of items, and put the credentials and the pool's invite code in App Review notes and Play's App access section.
+
+### 4A. Create the reviewer account & seed pool in `poolcart-prod`
+
+1. In Supabase Dashboard → **Authentication → Users → Add user → Create new user**:
+   - **Email:** `reviewer@poolcart.app`
+   - **Password:** `PoolCartReview2026!`
+   - **Auto Confirm User:** **Checked (ON)**
+2. In Supabase Dashboard → **SQL Editor**, run this idempotent block to seed the `REVIEW-01` sample pool for `reviewer@poolcart.app` (with a 5/6 case-split item ready to lock on a single `+` tap, plus a direct item and a neighbor wishlist request):
+
+```sql
+do $$
+declare
+  v_reviewer_id text;
+begin
+  select id::text into v_reviewer_id
+  from auth.users
+  where lower(email) = 'reviewer@poolcart.app'
+  limit 1;
+
+  if v_reviewer_id is null then
+    raise exception 'Create confirmed user reviewer@poolcart.app in Authentication -> Users first.';
+  end if;
+
+  perform set_config('request.jwt.claim.sub', v_reviewer_id, true);
+  perform set_config('request.jwt.claim.email', 'reviewer@poolcart.app', true);
+
+  perform public.upsert_my_profile('App Reviewer (Host)', 'Victoria Gardens', '#0D9488');
+
+  delete from public.pools where id = 'pool_app_review_01' or upper(join_code) = 'REVIEW-01';
+
+  perform public.create_pool_with_catalog(jsonb_build_object(
+    'id', 'pool_app_review_01',
+    'joinCode', 'REVIEW-01',
+    'title', 'Victoria Gardens Wholesale Co-Op',
+    'supplierName', 'Restaurant Depot & Local Farms',
+    'supplierBadge', 'Wholesale Direct • Case Split',
+    'category', 'Produce & Pantry',
+    'hostName', 'App Reviewer (Host)',
+    'hostVenmoHandle', '@PoolCart-Host',
+    'neighborhood', 'Victoria Gardens',
+    'distanceMiles', 0.4,
+    'pickupAddress', '12505 North Mainstreet, Rancho Cucamonga, CA 91739',
+    'pickupWindow', 'Saturday 10:00 AM – 1:00 PM',
+    'cutoffTime', 'Friday 6:00 PM',
+    'minimumOrderAmount', 120,
+    'deliveryFee', 15,
+    'freeDeliveryThreshold', 180,
+    'items', jsonb_build_array(
+      jsonb_build_object(
+        'id', 'rev_item_avocados',
+        'name', 'Organic Hass Avocados (48-ct Case)',
+        'category', 'Produce',
+        'emoji', '🥑',
+        'mode', 'case_split',
+        'unitLabel', '1 bag (8 avocados)',
+        'unitPrice', 11.50,
+        'retailPrice', 16.99,
+        'caseSize', 6,
+        'maxCases', 3,
+        'claims', jsonb_build_array(
+          jsonb_build_object('userId', v_reviewer_id, 'quantity', 5)
+        )
+      ),
+      jsonb_build_object(
+        'id', 'rev_item_jasmine_rice',
+        'name', 'Three Ladies Jasmine Rice (25 lb Sack)',
+        'category', 'Staples',
+        'emoji', '🍚',
+        'mode', 'individual',
+        'unitLabel', '1 sack (25 lb)',
+        'unitPrice', 24.00,
+        'retailPrice', 34.99,
+        'claims', jsonb_build_array(
+          jsonb_build_object('userId', v_reviewer_id, 'quantity', 3)
+        )
+      ),
+      jsonb_build_object(
+        'id', 'rev_item_olive_oil',
+        'name', 'California Extra Virgin Olive Oil (6 x 1L Case)',
+        'category', 'Pantry',
+        'emoji', '🫒',
+        'mode', 'case_split',
+        'unitLabel', '1 bottle (1L)',
+        'unitPrice', 13.00,
+        'retailPrice', 19.50,
+        'caseSize', 6,
+        'maxCases', 2,
+        'claims', '[]'::jsonb
+      )
+    ),
+    'messages', jsonb_build_array(
+      jsonb_build_object(
+        'id', 'rev_msg_welcome',
+        'isAnnouncement', true,
+        'text', 'Welcome to the Victoria Gardens weekly wholesale pool! Tap + on Organic Hass Avocados (currently 5/6 shares) to complete Case #1 and meet the $120 wholesale minimum.',
+        'createdAt', 'Pinned'
+      )
+    )
+  ));
+end $$;
+```
+
+### 4B. Copy-pasteable App Store Connect & Google Play Review Notes
+
+- **Sign-In Credentials:**
+  - **Email:** `reviewer@poolcart.app`
+  - **Password:** `PoolCartReview2026!`
+  - **Sample Pool Invite Code:** `REVIEW-01` (already joined on this account; can also be joined from any new account via **🔑 Code → REVIEW-01**)
+
+- **Review Notes Text (paste into App Store Connect → App Review Information → Notes & Google Play Console → App content → App access):**
+
+> PoolCart is a neighborhood grocery group-buying and bulk case-splitting coordination app.
+>
+> 1. **Sign In:** Use `reviewer@poolcart.app` / `PoolCartReview2026!` on the sign-in screen (or create a new account and tap **🔑 Code** in the top header to join invite code `REVIEW-01`).
+> 2. **Test Case-Splitting & Order Pooling:** Open **Victoria Gardens Wholesale Co-Op (`REVIEW-01`)**. On the **🛒 Shop** tab, tap **+** on *Organic Hass Avocados* (pre-set at 5/6 shares) to lock Case #1 (6/6 shares) and cross the $120 wholesale order minimum.
+> 3. **Test Split Ledger & Host Sheet:** Open the **💸 Splits** and **📋 Host** tabs to inspect per-neighbor pro-rata cost breakdowns, receipt true-up, and pool lock controls. No in-app payments or card charges are processed in the app; neighbors settle externally in person or via Venmo deep link.
+> 4. **In-App Account Deletion (Guideline 5.1.1(v)):** Open the **⚡ Sync** tab at the bottom right, scroll to the **Account** section, and tap **Delete Account** (with confirmation dialog) to permanently delete the signed-in account and its associated data.
 
 ## 5. Privacy questionnaires
 

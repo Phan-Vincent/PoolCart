@@ -1326,7 +1326,48 @@ test('App rolls back rejected edits and creates local pools only for queued fail
     assert.match(status.label,queued?/queued/:/not saved/);
     assert.match(messages.at(-1),queued?/queued/:/not saved/);
     assert.match(messages.at(-1),/Server reason/);
+
+    context.PoolRepository.joinCloudPoolByInvite=async code=>({error:'Server reason',state:'network_unavailable',queued,joinCode:code.trim().toUpperCase()});
+    const joinRes=await callback('handleJoinByInviteCode',context)(' alpha-01 ');
+    assert.equal(status.pendingLocalEditsCount,queued?1:0);
+    assert.match(status.label,queued?/queued/:/rejected/);
+    assert.match(joinRes.error,queued?/queued/:/Server reason/);
   }
+});
+
+test('Offline invite joins deduplicate by code and empty_cloud clears stale local cache when no edits are pending',async()=>{
+  const cfg={url:'https://test.supabase.co',anonKey:'anon-test',enabled:true};
+  const user={...member};
+  await PoolRepository.clearPendingCloudEdits();
+  PoolRepository.setTestSupabaseClient({rpc:async()=>({data:null,error:{message:'Network request failed'}})},cfg);
+  const first=await PoolRepository.joinCloudPoolByInvite(' alpha-01 ',user);
+  const second=await PoolRepository.joinCloudPoolByInvite('ALPHA-01',user);
+  assert.equal(first.queued,true);
+  assert.equal(second.queued,true);
+  const queued=await PoolRepository.loadPendingCloudEdits();
+  assert.equal(queued.length,1,'Repeated offline invite joins for the same code must deduplicate');
+  assert.equal(queued[0].joinCode,'ALPHA-01');
+
+  await PoolRepository.clearPendingCloudEdits();
+  await PoolRepository.saveLocalPools([pool()]);
+  assert.equal((await PoolRepository.loadLocalPools()).length,1);
+
+  const emptyCloudClient={
+    auth:{getSession:async()=>({data:{session:{user:{id:'u1',email:'host@example.edu',user_metadata:{}}}},error:null})},
+    rpc:async()=>({data:{id:'u1',name:'Host',neighborhood:'Demo',avatarColor:'#0D9488'},error:null}),
+    from:()=>({
+      select:()=>{
+        const result={data:[],error:null};
+        return {order:async()=>result,then:(resolve,reject)=>Promise.resolve(result).then(resolve,reject)};
+      },
+    }),
+  };
+  PoolRepository.setTestSupabaseClient(emptyCloudClient,cfg);
+  const loaded=await PoolRepository.loadPools();
+  assert.equal(loaded.cloudState,'empty_cloud');
+  assert.equal(storage.get('@poolcart_pools_v3'),'[]','empty_cloud with 0 pending edits must clear stale cached pools');
+  PoolRepository.setTestSupabaseClient(null,{url:'',anonKey:'',enabled:false});
+  storage.delete('@poolcart_pools_v3');
 });
 
 require('./ui.cjs')(test, {assert, pool, finalized, host, member, initialPools: INITIAL_POOLS, ts});

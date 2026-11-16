@@ -473,6 +473,8 @@ declare
   v_deliv numeric := coalesce((p_pool ->> 'deliveryFee')::numeric, 0);
   v_free numeric := (p_pool ->> 'freeDeliveryThreshold')::numeric;
   v_item jsonb;
+  v_claim_elem jsonb;
+  v_num numeric;
   v_msg jsonb;
 begin
   if v_pool_id = '' or v_title = '' or v_join_code !~ '^[A-Z0-9_-]+$' then
@@ -553,18 +555,35 @@ begin
       (v_item ->> 'maxCases')::numeric::integer
     );
 
-    if jsonb_array_length(coalesce(v_item -> 'claims', '[]'::jsonb)) > 0 then
+    for v_claim_elem in select * from jsonb_array_elements(coalesce(v_item -> 'claims', '[]'::jsonb))
+    loop
+      if (v_claim_elem ->> 'userId') is not null and (v_claim_elem ->> 'userId') <> v_uid then
+        raise exception 'An added item can only contain your own claim.';
+      end if;
+      if jsonb_typeof(v_claim_elem -> 'quantity') is distinct from 'number' then
+        raise exception 'Claim quantity must be a whole number between 1 and 1000000.';
+      end if;
+      v_num := (v_claim_elem ->> 'quantity')::numeric;
+      if v_num < 1 or v_num > 1000000 or v_num <> trunc(v_num) then
+        raise exception 'Claim quantity must be a whole number between 1 and 1000000.';
+      end if;
       insert into public.item_claims (
         pool_id, item_id, user_id, user_name, avatar_color, quantity
       )
-      select
+      values (
         v_pool_id,
         v_item ->> 'id',
         v_uid,
         v_profile.display_name,
         v_profile.avatar_color,
-        greatest(1, ((v_item -> 'claims' -> 0) ->> 'quantity')::integer)
-      where ((v_item -> 'claims' -> 0) ->> 'quantity')::integer > 0;
+        v_num::integer
+      );
+    end loop;
+
+    if (v_item ->> 'mode') = 'case_split' and (v_item -> 'maxCases') is not null and (v_item -> 'maxCases') <> 'null'::jsonb then
+      if (select coalesce(sum(quantity), 0) from public.item_claims where item_id = (v_item ->> 'id')) > ((v_item ->> 'maxCases')::numeric::integer * (v_item ->> 'caseSize')::numeric::integer) then
+        raise exception 'This item has reached its case cap.';
+      end if;
     end if;
   end loop;
 

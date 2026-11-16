@@ -172,12 +172,24 @@ await asUser(B, async () => {
 });
 console.log('member catalog validation: all checks passed');
 
-// Pool creation uses the same rules and rolls back the pool if an item is invalid.
+// Pool creation uses the same rules and rolls back the pool if an item or initial claim is invalid.
 await asUser(C, async () => {
   const base = { id: 'catalog_pool', joinCode: 'CATALOG-POOL', title: 'Catalog test', minimumOrderAmount: 10, freeDeliveryThreshold: 20 };
   const item = { id: 'created_item', name: ' Created rice ', unitLabel: ' bag ', mode: 'individual', unitPrice: 1, retailPrice: 2 };
   const create = (items) => db.query('select public.create_pool_with_catalog($1::jsonb)', [JSON.stringify({ ...base, items })]);
   await assert.rejects(() => create([{ ...item, mode: 'case_split' }]), /Shares per case must be a whole number between 2 and 1000/);
+  await assert.rejects(
+    () => create([{ ...item, mode: 'case_split', caseSize: 4, maxCases: 1, claims: [{ userId: C, quantity: 5 }] }]),
+    /This item has reached its case cap/
+  );
+  await assert.rejects(
+    () => create([{ ...item, claims: [{ userId: C, quantity: 0 }] }]),
+    /Claim quantity must be a whole number between 1 and 1000000/
+  );
+  await assert.rejects(
+    () => create([{ ...item, claims: [{ userId: B, quantity: 1 }] }]),
+    /An added item can only contain your own claim/
+  );
   assert.equal((await q("select id from public.pools where id = 'catalog_pool'")).length, 0);
   await create([item]);
   assert.deepEqual(await q("select name, unit_label from public.catalog_items where id = 'created_item'"), [{ name: 'Created rice', unit_label: 'bag' }]);

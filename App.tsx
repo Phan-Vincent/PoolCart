@@ -625,6 +625,28 @@ export default function App() {
       await refreshPools();
       return { poolId: res.poolId };
     }
+    const pending = await PoolRepository.loadPendingCloudEdits();
+    setSyncStatus((prev) => ({
+      ...prev,
+      mode:
+        res.state === 'network_unavailable'
+          ? 'supabase_offline'
+          : res.state === 'auth_rejected'
+          ? 'supabase_auth_rejected'
+          : 'supabase_error',
+      label: res.queued
+        ? 'Cloud invite join queued on device — retry from the Sync tab'
+        : 'Cloud invite join rejected — could not join pool',
+      errorMessage: res.error,
+      pendingLocalEditsCount: pending.length,
+    }));
+    if (res.queued) {
+      return {
+        error: `Cloud could not join pool "${code.trim().toUpperCase()}" yet (${
+          res.error || 'offline'
+        }). Your join request is queued on this device and will retry from the Sync tab.`,
+      };
+    }
     return { error: res.error || 'Could not join cloud pool.' };
   };
 

@@ -873,6 +873,20 @@ export const PoolRepository = {
 
   async queuePendingCloudEdit(edit: PendingCloudEdit): Promise<PendingCloudEdit[]> {
     const existing = await this.loadPendingCloudEdits();
+    if (edit.kind === 'join_invite' && edit.joinCode) {
+      const normalizedCode = edit.joinCode.trim().toUpperCase();
+      const idx = existing.findIndex(
+        (e) =>
+          e.kind === 'join_invite' &&
+          e.joinCode?.trim().toUpperCase() === normalizedCode
+      );
+      if (idx !== -1) {
+        const updated = [...existing];
+        updated[idx] = { ...edit, joinCode: normalizedCode };
+        await this.savePendingCloudEdits(updated);
+        return updated;
+      }
+    }
     const updated = [...existing, edit];
     await this.savePendingCloudEdits(updated);
     return updated;
@@ -938,6 +952,10 @@ export const PoolRepository = {
 
         if (!poolsRes.data || poolsRes.data.length === 0) {
           // Never auto-upload sample fixtures on an empty database!
+          // Clear any stale cached cloud pools when there are no unsent edits.
+          if (pendingEdits.length === 0) {
+            await enqueueWrite(() => AsyncStorage.setItem(STORAGE_KEY_POOLS, '[]'));
+          }
           return {
             pools: [],
             cloudState: 'empty_cloud',
