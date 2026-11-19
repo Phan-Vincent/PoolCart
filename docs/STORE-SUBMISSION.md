@@ -2,32 +2,36 @@
 
 Code-side blockers are handled in the repo: icons and splash, a hosted build mode with a sign-in gate, demo features hidden in store builds, in-app account deletion, and a privacy policy page. The steps below need your accounts, so they have to be done by you.
 
-## 1. Production backend (Supabase)
+## 1. Production backend (Supabase) — done 2026-11-12
 
-1. Create a production Supabase project (separate from any test project).
-2. In **SQL Editor**, run `supabase/schema.sql`. It can be re-run safely; `npm run test:sql` applies it twice to a local Postgres to confirm that.
-3. **Authentication → Providers → Email**: keep email confirmation **on**.
-4. **Authentication → URL Configuration**: set Site URL to your website (for example the Vercel domain).
-5. Copy the **Project URL** and **anon/public key** from Project Settings → API.
+- Project `poolcart-prod`, ref `xvfrmivhkrlpodwsadxc`, region us-west-1, org PoolCart (free plan).
+- `EXPO_PUBLIC_SUPABASE_URL` = `https://xvfrmivhkrlpodwsadxc.supabase.co`
+- `EXPO_PUBLIC_SUPABASE_ANON_KEY` = the legacy **anon** key from Project Settings → API Keys. It's public by design (row-level security and server-side checks protect the data), but it's left out of this file so it can be rotated.
+- `supabase/schema.sql` applied as migrations `poolcart_01`–`05`. The live function sources match the repo file exactly (checked by checksum). `delete_my_account` and a host → join → claim → outsider-blocked flow were exercised live as the `authenticated` role, then cleaned up.
+- Advisors: performance clean. The remaining security notes list the RPCs signed-in users are meant to call.
 
-## 2. Privacy policy
+Still to do in the dashboard:
+1. **Authentication → Providers → Email**: confirm email confirmation is **on** (it is by default).
+2. **Authentication → URL Configuration**: set Site URL to your website once the Vercel domain exists.
+3. **Before launch:** upgrade the org to Pro. Free projects pause after about a week without activity.
+4. To change the schema later, edit `supabase/schema.sql`, run `npm run test:sql`, then apply only the changed statements as a new migration.
 
-1. Fill in the highlighted `[DATE]`, `[OPERATOR NAME]`, and `[CONTACT EMAIL]` placeholders in `public/privacy.html`.
-2. Deploy the web export to Vercel (`vercel.json` is already set up). The page is served at `/privacy`.
-3. Use that URL for `EXPO_PUBLIC_PRIVACY_POLICY_URL` and in both store listings.
+## 2. Privacy policy and website — done 2026-11-12
 
-## 3. EAS
+- Vercel project `poolcart`, production at **https://poolcart.vercel.app**. The root is the store web build (sign-in screen, connected to `poolcart-prod`).
+- Privacy policy: **https://poolcart.vercel.app/privacy**. Use this URL in both store listings and for `EXPO_PUBLIC_PRIVACY_POLICY_URL` in EAS.
+- Vercel production env vars: `EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY` (public config by design), `EXPO_PUBLIC_PRIVACY_POLICY_URL`.
+- Redeploy after changes with `vercel deploy --prod`. `.vercelignore` keeps `qa/`, `docs/`, and `tests/` out of the upload.
+- Remove the stray `EXPO_PUBLIC_TEST_PROBE` env var: `vercel env rm EXPO_PUBLIC_TEST_PROBE production` (the CLI needs you to confirm interactively).
+- In Supabase: **Authentication → URL Configuration → Site URL** = `https://poolcart.vercel.app`. This is what email confirmation links point to.
 
-```bash
-npm install -g eas-cli
-eas login
-eas init                      # writes owner + extra.eas.projectId into app.json
-eas env:create --environment production --name EXPO_PUBLIC_SUPABASE_URL --value https://<project>.supabase.co --visibility plaintext
-eas env:create --environment production --name EXPO_PUBLIC_SUPABASE_ANON_KEY --value <anon key> --visibility plaintext
-eas env:create --environment production --name EXPO_PUBLIC_PRIVACY_POLICY_URL --value https://<domain>/privacy --visibility plaintext
-```
+## 3. EAS — set up 2026-11-12
 
-Repeat the `env:create` lines with `--environment preview` for internal test builds.
+- Expo project **@phanvincent/poolcart** (ID `1dbf10f7-fe5b-4255-bd18-89b88358aab6`), owned by the personal `phanvincent` account. It can be transferred to `phanvincents-team` later from the Expo dashboard.
+- EAS environment variables, all plaintext: `EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY`, and `EXPO_PUBLIC_PRIVACY_POLICY_URL`, on both **production** and **preview**. **development** has none, so dev-client builds stay in local demo mode.
+- `eas config --profile production` resolves the variables, bundle ID / package `com.poolcart.grocerygroupbuy`, remote build numbers with `autoIncrement`, and environment `production`.
+
+Builds (iOS asks for your Apple Developer login the first time and creates the certificates and provisioning profile; Android generates an upload keystore that EAS stores):
 
 ```bash
 eas build --platform ios --profile production
@@ -37,6 +41,12 @@ eas submit --platform android  # first upload must be done manually in Play Cons
 ```
 
 Builds without the two Supabase variables run as the local demo, so check that the TestFlight build opens on the sign-in screen.
+
+### Build and signing status (2026-11-14)
+
+- **iOS:** Apple team Vincent Phan (Individual) `77FQBK9E92`. EAS-managed distribution certificate and App Store provisioning profile, both valid until 2027-11-14. Build 1.0.0 (5) was submitted to App Store Connect app **6834996608** (pinned as `ascAppId` in `eas.json`). The TestFlight group "Team (Expo)" includes phanvincent2@gmail.com. An ASC API key is stored on EAS, so `eas submit --platform ios --latest` no longer needs your password.
+- **Android:** EAS-managed upload keystore. Production `.aab` 1.0.0 (2) is built but not yet uploaded; the first upload goes through Play Console → Internal testing by hand. `eas build -p android --profile preview` makes a sideloadable `.apk` against the production backend.
+- **Don't delete** the keystore or certificates in the Expo dashboard. Play requires every update to be signed with the same upload key.
 
 ## 4. Accounts and listings
 
@@ -61,6 +71,36 @@ Data collected (all linked to the user, none used for tracking, none shared for 
 - Tracking: **No**. No analytics or ad SDKs.
 - Data encrypted in transit: **Yes**. Users can request deletion: **Yes**, in-app (Account → Delete account).
 - Google Play also requires a **web** deletion path. The privacy policy's email fallback covers it; link the policy's "Retention and deletion" section in the Data safety form.
+
+## 6. Chat safety (App Review Guideline 1.2)
+
+Pool chat is user-generated content, so Apple expects a filter, a way to report, a way to block, and published contact info. The app now has all four:
+
+- **Filter:** `public.contains_blocked_terms()` rejects messages with common slurs and profanity on the server; `src/utils/contentFilter.ts` mirrors the list so the app shows the error before sending. Keep the two lists identical (`npm test` checks).
+- **Report:** Report under any other neighbor's message calls `report_pool_message`, which stores a snapshot in `public.content_reports`. Neither app users nor the public API can read that table.
+- **Block:** Block calls `block_user`; the read policy on `pool_messages` then hides that person's messages from the blocker in every pool. Unblock from the Blocked neighbors list at the bottom of the chat.
+- **Contact:** the privacy policy's "Reporting and blocking" section, with the contact email.
+
+To go live:
+
+1. Apply the schema changes to `poolcart-prod`: sections 6B, the filter function in 7, the `message` checks in 8, 8G, the new `pool_messages` read policy, and the new grants. `supabase/schema.sql` is re-runnable, and `npm run test:sql` exercises all of it.
+2. Redeploy the website (`vercel deploy --prod`) so the updated privacy policy is live.
+3. Make a new iOS build; build 1.0.0 (5) doesn't have these controls.
+4. In App Review notes, say: "Report and Block appear under every message from another member in a pool's Chat tab. Reports are reviewed by the developer."
+
+Reviewing reports (Supabase → SQL Editor):
+
+```sql
+select id, created_at, reason, details, message_text, reported_user_id, pool_id, message_id
+from public.content_reports where status = 'open' order by created_at;
+
+-- After acting on one:
+update public.content_reports set status = 'actioned' where id = <id>;   -- or 'dismissed'
+-- Remove an offending message:
+delete from public.pool_messages where id = '<message_id>';
+```
+
+Check for open reports at least daily while the app is in review or on the store.
 
 ## Still open after this (not store blockers)
 

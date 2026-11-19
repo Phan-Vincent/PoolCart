@@ -1,5 +1,6 @@
 import { CatalogItem, GroupBuyPool, Participant, PastOrderReceipt, PoolMessage, PorchDropCheckIn, ReceiptTrueUp, WishlistRequest } from '../types/groupBuy';
 import { getCaseSplitStatus, getParticipantBreakdowns, getPoolProgressSummary, money } from './calculations';
+import { BLOCKED_TERMS_MESSAGE, containsBlockedTerms } from './contentFilter';
 
 export { getParticipantBreakdowns };
 
@@ -194,6 +195,7 @@ export function applyPoolAction(previous: GroupBuyPool, user: Participant, actio
     case 'message':
       assert(!action.message.isAnnouncement || host, 'Only the host can pin an announcement.');
       assert(action.message.text.trim() && action.message.text.length <= 4000, 'Messages must contain 1–4000 characters.');
+      assert(!containsBlockedTerms(action.message.text), BLOCKED_TERMS_MESSAGE);
       pool.messages.push({ ...action.message, poolId: pool.id, userId: user.id, userName: user.name, avatarColor: user.avatarColor, isHost: host });
       break;
     case 'lock':

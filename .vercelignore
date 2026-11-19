@@ -1,0 +1,11 @@
+qa/
+docs/
+tests/
+.expo/
+dist/
+*.zip
+*.patch
+.env
+.Rhistory
+.env.local
+.vercel/
