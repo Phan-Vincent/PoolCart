@@ -36,6 +36,8 @@ const {
   PoolRepository,
   CLOUD_SYNC_AVAILABLE,
   assembleCloudPoolsFromRows,
+  collectCloudPoolsFromRows,
+  classifyCloudError,
   sanitizePoolForCloud,
 } = require('../src/services/repository.ts');
 const {createWriteQueue} = require('../src/services/storageQueue.ts');
@@ -44,7 +46,7 @@ const {NotificationService, DEFAULT_NOTIFICATION_PREFS} = require('../src/servic
 const host = {id:'h',name:'Host',avatarColor:'#111',neighborhood:'Demo',isHost:true,paidStatus:'pending'};
 const member = {id:'n',name:'Neighbor',avatarColor:'#222',neighborhood:'Demo',paidStatus:'pending'};
 const outsider = {id:'x',name:'Host',avatarColor:'#333',neighborhood:'Demo',paidStatus:'pending'};
-function pool(quantities=[3,4]) { return { id:'p',joinCode:'TEST-1',title:'Test',supplierName:'Sample',supplierBadge:'Sample',category:'Test',hostUserId:'h',hostName:'Host',neighborhood:'Demo',pickupAddress:'Sample address',pickupWindow:'Next Saturday',cutoffTime:'Friday',minimumOrderAmount:65,deliveryFee:3.01,freeDeliveryThreshold:65,status:'open',participants:[{...host},{...member}],messages:[],wishlist:[],items:[{id:'i',name:'Jasmine Rice',emoji:'🌾',category:'Staples',mode:'case_split',caseSize:6,maxCases:2,unitLabel:'1 share',unitPrice:10,retailPrice:15,claims:[host,member].map((p,i)=>({userId:p.id,userName:p.name,avatarColor:p.avatarColor,quantity:quantities[i]})).filter(c=>c.quantity>0)}] }; }
+function pool(quantities=[3,4]) { return { id:'p',joinCode:'TEST-1',title:'Test',supplierName:'Sample',supplierBadge:'Sample',category:'Test',hostUserId:'h',hostName:'Host',neighborhood:'Demo',pickupAddress:'Sample address',pickupWindow:'Next Saturday',cutoffTime:'Friday',minimumOrderAmount:65,deliveryFee:3.01,freeDeliveryThreshold:65,status:'open',participants:[{...host},{...member}],messages:[],wishlist:[],items:[{id:'i',name:'Jasmine Rice',emoji:'🍚',category:'Staples',mode:'case_split',caseSize:6,maxCases:2,unitLabel:'1 share',unitPrice:10,retailPrice:15,claims:[host,member].map((p,i)=>({userId:p.id,userName:p.name,avatarColor:p.avatarColor,quantity:quantities[i]})).filter(c=>c.quantity>0)}] }; }
 function finalized() {const p=pool([3,3]);p.minimumOrderAmount=50;p.freeDeliveryThreshold=70;p.status='locked';return p;}
 function apply(p,user,action) {return domain.applyPoolAction(p,user,action);}
 function sumCents(rows,key){return rows.reduce((sum,row)=>sum+Math.round(row[key]*100),0);}
@@ -87,7 +89,7 @@ test('Reorder exceeding a cap rejects atomically without mutating the original',
 test('Add-item and promotion claims always have participants',()=>{
   const p=pool();const added=apply(p,outsider,{type:'addItems',items:[{...p.items[0],id:'new',claims:[{userId:'x',userName:'Host',avatarColor:'#333',quantity:1}]}]});assert(added.participants.some(u=>u.id==='x'));
   p.wishlist=[{id:'w',poolId:'p',title:'Flour',emoji:'🌾',category:'Staples',suggestedUnitLabel:'1 share',estimatedUnitPrice:5,estimatedRetailPrice:5,targetCaseSize:4,requestedByUserId:'x',requestedByUserName:'New Neighbor',pledgedUserIds:['x','n']}];
-  const promoted=apply(p,host,{type:'promote',wishId:'w'});assert(promoted.participants.some(u=>u.id==='x'));assert.throws(()=>apply(promoted,host,{type:'promote',wishId:'w'}),/already/);
+  const promoted=apply(p,host,{type:'promote',wishId:'w',newItemId:'item_custom_promoted'});assert(promoted.participants.some(u=>u.id==='x'));assert.equal(promoted.items[0].id,'item_custom_promoted');assert.throws(()=>apply(promoted,host,{type:'promote',wishId:'w'}),/already/);
 });
 test('Drop-partial removes exactly pending allocation and cover uses the current remainder',()=>{
   const p=pool();const trimmed=apply(p,host,{type:'trim',itemId:'i'});assert.deepEqual(trimmed.items[0].claims.map(c=>c.quantity),[3,3]);const covered=apply(p,host,{type:'cover',itemId:'i'});assert.deepEqual(covered.items[0].claims.map(c=>c.quantity),[8,4]);
@@ -165,6 +167,23 @@ test('Notification preferences suppress local case and proximity alerts',()=>{
   const p=pool([3,2]),next=apply(p,member,{type:'claim',itemId:'i',delta:1});next.minimumOrderAmount=500;
   const alerts=NotificationService.evaluateClaimMilestones(p,next,p.items[0],{justCompletedCase:true,cappedAtMaxCases:false,justOpenedNewCase:false,fullCasesCount:1}, {...DEFAULT_NOTIFICATION_PREFS,caseSplitCompletion:false,freeDeliveryProximity:false});assert.equal(alerts.length,0);
 });
+test('Milestone alerts use clean UTF-8 emojis without Private Use Area mojibake',()=>{
+  const prev=pool([3,2]);
+  prev.minimumOrderAmount=60;
+  prev.freeDeliveryThreshold=60;
+  const next=apply(prev,member,{type:'claim',itemId:'i',delta:1});
+  const alerts=NotificationService.evaluateClaimMilestones(
+    prev,
+    next,
+    prev.items[0],
+    { newUserQuantity:3, totalClaimedUnits:6, fullCasesCount:1, remainderUnits:0, justCompletedCase:true, justOpenedNewCase:false, cappedAtMaxCases:false },
+    DEFAULT_NOTIFICATION_PREFS
+  );
+  assert.equal(alerts.length, 3);
+  for (const a of alerts) {
+    assert(!/[\uE000-\uF8FF]/.test(a.title), `Expected no PUA mojibake in alert title: ${a.title}`);
+  }
+});
 
 // ============================================================================
 // New Cloud-Preserving & Server-Boundary Regression Groups
@@ -175,9 +194,6 @@ test('Notification preferences suppress local case and proximity alerts',()=>{
  * `supabase/schema.sql` (RLS member-only SELECTs + SECURITY DEFINER RPCs
  * `upsert_my_profile`, `join_pool_by_invite`, `create_pool_with_catalog`,
  * `claim_item_share`, and `apply_pool_action_rpc`).
- * Note: This is a deterministic in-memory simulator of the SQL schema rules,
- * paired with static inspection of `supabase/schema.sql`, because no live
- * PostgreSQL server is running in this test environment.
  */
 function createSimulatedCloudBackend() {
   const db = {
@@ -249,6 +265,16 @@ function createSimulatedCloudBackend() {
       isMinimumMet: committed > 0 && committed >= p.minimum_order_amount,
       hasPartialCases: hasPartial,
     };
+  }
+
+  function resetPoolSettlements(poolId) {
+    for (const pRow of db.pool_participants.values()) {
+      if (pRow.pool_id === poolId) {
+        pRow.paid_status = 'pending';
+        pRow.settled_amount = null;
+        pRow.picked_up = false;
+      }
+    }
   }
 
   function clientForSession(sessionUser) {
@@ -478,13 +504,7 @@ function createSimulatedCloudBackend() {
                 });
               }
               if (nextUserQty !== currentQty) {
-                for (const pRow of db.pool_participants.values()) {
-                  if (pRow.pool_id === params.p_pool_id) {
-                    pRow.paid_status = 'pending';
-                    pRow.settled_amount = null;
-                    pRow.picked_up = false;
-                  }
-                }
+                resetPoolSettlements(params.p_pool_id);
               }
               return {
                 data: {
@@ -545,13 +565,7 @@ function createSimulatedCloudBackend() {
                     const it = db.catalog_items.get(upd.itemId);
                     if (it && it.pool_id === poolId) it.actual_unit_price = upd.newPrice;
                   }
-                  for (const pRow of db.pool_participants.values()) {
-                    if (pRow.pool_id === poolId) {
-                      pRow.paid_status = 'pending';
-                      pRow.settled_amount = null;
-                      pRow.picked_up = false;
-                    }
-                  }
+                  resetPoolSettlements(poolId);
                   break;
                 case 'porch':
                   targetPool.porch_check_in = action.checkIn;
@@ -575,6 +589,44 @@ function createSimulatedCloudBackend() {
                   wish.pledgedUserIds = wish.pledgedUserIds.includes(uid)
                     ? wish.pledgedUserIds.filter((id) => id !== uid)
                     : [...wish.pledgedUserIds, uid];
+                  break;
+                }
+                case 'promote': {
+                  const wish = (targetPool.wishlist || []).find((w) => w.id === action.wishId && !w.promotedToCatalog);
+                  if (!wish) throw { code: 'P0001', message: 'Wishlist request was already promoted or removed.' };
+                  wish.promotedToCatalog = true;
+                  const newItemId = action.newItemId || ('item_' + Math.random().toString(36).slice(2, 10));
+                  db.catalog_items.set(newItemId, {
+                    id: newItemId,
+                    pool_id: poolId,
+                    name: wish.title,
+                    category: wish.category || 'Neighbor Request',
+                    emoji: wish.emoji || '📦',
+                    mode: 'case_split',
+                    unit_label: wish.suggestedUnitLabel,
+                    unit_price: wish.estimatedUnitPrice,
+                    actual_unit_price: null,
+                    retail_price: wish.estimatedRetailPrice,
+                    case_size: wish.targetCaseSize,
+                    max_cases: null,
+                  });
+                  let anyClaim = false;
+                  for (const pledgerId of new Set(wish.pledgedUserIds || [])) {
+                    const pledger = db.pool_participants.get(`${poolId}:${pledgerId}`);
+                    if (pledger) {
+                      db.item_claims.set(`${newItemId}:${pledgerId}`, {
+                        pool_id: poolId,
+                        item_id: newItemId,
+                        user_id: pledgerId,
+                        user_name: pledger.user_name,
+                        avatar_color: pledger.avatar_color,
+                        quantity: 1,
+                        claim_seq: db.claimSeq++,
+                      });
+                      anyClaim = true;
+                    }
+                  }
+                  if (anyClaim) resetPoolSettlements(poolId);
                   break;
                 }
                 case 'lock':
@@ -605,6 +657,7 @@ function createSimulatedCloudBackend() {
                   break;
                 }
                 case 'reorder': {
+                  let changed = false;
                   for (const past of action.receipt.items || []) {
                     let item = [...db.catalog_items.values()].find((i) => i.pool_id === poolId && i.name.toLowerCase() === past.name.toLowerCase());
                     if (!item) {
@@ -620,7 +673,9 @@ function createSimulatedCloudBackend() {
                     if (item.mode === 'case_split' && item.max_cases && totalQty > item.max_cases * item.case_size) {
                       throw { code: 'P0001', message: 'This item has reached its case cap.' };
                     }
+                    changed = true;
                   }
+                  if (changed) resetPoolSettlements(poolId);
                   break;
                 }
               }
@@ -742,7 +797,8 @@ test('Server boundary rejects cross-pool reads, forged identity claims, and non-
     assert.match(res.error, /host/i);
   }
 
-  await PoolRepository.clearPendingCloudEdits();
+  // Non-network rejections must not be queued into pending local edits
+  assert.equal((await PoolRepository.loadPendingCloudEdits()).length, 0);
   PoolRepository.setTestSupabaseClient(null, { url: '', anonKey: '', enabled: false });
 });
 
@@ -879,7 +935,7 @@ test('Concurrent last-share claims serialize under lock without exceeding max_ca
       receipt: {
         items: [
           { name: 'New Sourdough Loaf', emoji: '🍞', unitLabel: '1 loaf', unitPrice: 6, retailPrice: 9, quantity: 1, mode: 'individual' },
-          { name: 'Jasmine Rice', emoji: '🌾', unitLabel: '1 share', unitPrice: 10, retailPrice: 15, quantity: 1, mode: 'case_split', caseSize: 2 },
+          { name: 'Jasmine Rice', emoji: '🍚', unitLabel: '1 share', unitPrice: 10, retailPrice: 15, quantity: 1, mode: 'case_split', caseSize: 2 },
         ],
       },
     },
@@ -935,6 +991,99 @@ test('Network failure during cloud mutation preserves pending local edits and re
   assert.equal(loadedAfter.cloudState, 'synced');
   assert.equal(loadedAfter.pools[0].items[0].claims[0].quantity, 1);
   PoolRepository.setTestSupabaseClient(null, { url: '', anonKey: '', enabled: false });
+});
+
+test('Permanent cloud rejections do not block subsequent valid offline edits and wishlist promote preserves deterministic newItemId',async()=>{
+  const sim = createSimulatedCloudBackend();
+  const hostSession = { id: 'auth_host_1', email: 'host@example.edu', name: 'Maya Host' };
+  const workingClient = sim.clientForSession(hostSession);
+  let offline = false;
+  const toggleableClient = {
+    ...workingClient,
+    rpc: async (fn, args) => {
+      if (offline) throw new Error('Network request failed: device offline');
+      return workingClient.rpc(fn, args);
+    },
+  };
+  PoolRepository.setTestSupabaseClient(toggleableClient, {
+    url: 'https://test.supabase.co',
+    anonKey: 'anon-test',
+    enabled: true,
+  });
+  await PoolRepository.clearPendingCloudEdits();
+
+  const p = pool([0, 0]);
+  p.id = 'pool_queue_resilience';
+  p.joinCode = 'QRES-01';
+  p.items[0].claims = [];
+  await PoolRepository.createCloudPool(p);
+
+  const hostUser = { id: hostSession.id, name: 'Maya Host', neighborhood: 'Demo', avatarColor: '#0D9488', isHost: true, paidStatus: 'pending' };
+  await PoolRepository.syncCloudPoolAction(p, hostUser, {
+    type: 'request',
+    wish: { id: 'wish_promote_1', poolId: p.id, title: 'Organic Flour', emoji: '🌾', category: 'Staples', suggestedUnitLabel: '10 lb', estimatedUnitPrice: 8, estimatedRetailPrice: 12, targetCaseSize: 5, requestedByUserId: hostSession.id, requestedByUserName: 'Maya Host', pledgedUserIds: [hostSession.id] },
+  });
+
+  // Queue an invalid edit followed by a valid promote + claim on that promoted item while offline
+  await PoolRepository.queuePendingCloudEdit({
+    id: 'bad_edit_1',
+    poolId: 'non_existent_pool',
+    createdAt: 'now',
+    kind: 'action',
+    action: { type: 'lock' },
+  });
+  offline = true;
+  await PoolRepository.syncCloudPoolAction(p, hostUser, {
+    type: 'promote',
+    wishId: 'wish_promote_1',
+    newItemId: 'item_det_flour',
+  });
+  await PoolRepository.syncAtomicClaimDelta(p.id, 'item_det_flour', hostUser, 1);
+
+  assert.equal((await PoolRepository.loadPendingCloudEdits()).length, 3);
+  offline = false;
+  const flushed = await PoolRepository.flushPendingCloudEdits([p], hostUser);
+  assert.equal(flushed.remaining, 0);
+  const loaded = (await PoolRepository.loadPools()).pools[0];
+  const promotedItem = loaded.items.find((it) => it.id === 'item_det_flour');
+  assert(promotedItem, 'Promoted item must exist with deterministic newItemId');
+  assert.equal(promotedItem.claims[0].quantity, 2, 'Initial pledge claim (1) + offline delta (+1) must equal 2');
+  PoolRepository.setTestSupabaseClient(null, { url: '', anonKey: '', enabled: false });
+});
+
+test('Cloud pool assembly isolates a malformed pool row without breaking valid pools',()=>{
+  const validRow = {
+    id: 'p_valid',
+    join_code: 'VALID-1',
+    title: 'Valid Pool',
+    supplier_name: 'Supplier',
+    supplier_badge: 'Direct',
+    category: 'Produce',
+    host_user_id: 'u1',
+    host_name: 'Host',
+    neighborhood: 'Demo',
+    pickup_address: '123 Main',
+    pickup_window: 'Sat',
+    cutoff_time: 'Fri',
+    minimum_order_amount: 100,
+    delivery_fee: 10,
+    free_delivery_threshold: 150,
+    status: 'open',
+  };
+  const malformedRow = {
+    ...validRow,
+    id: 'p_malformed',
+    join_code: 'BAD-1',
+    minimum_order_amount: -50, // Invalid negative minimum
+  };
+  const parts = [
+    { pool_id: 'p_valid', user_id: 'u1', user_name: 'Host', is_host: true, paid_status: 'pending' },
+    { pool_id: 'p_malformed', user_id: 'u1', user_name: 'Host', is_host: true, paid_status: 'pending' },
+  ];
+  const assembled = assembleCloudPoolsFromRows([malformedRow, validRow], parts, [], [], []);
+  assert.equal(assembled.length, 1);
+  assert.equal(assembled[0].id, 'p_valid');
+  assert.throws(() => assembleCloudPoolsFromRows([malformedRow], parts, [], [], []));
 });
 
 async function withHostedBuild(run){
@@ -1027,5 +1176,233 @@ test('Signed-in report and block go through the server RPCs; the local demo keep
     await assert.rejects(()=>PoolRepository.reportMessage('m1','spam'),/your own message/);
   });
 });
+
+test('Cloud error classification treats only permanent server rejections as permanent',()=>{
+  const cases=[
+    [{message:'Service Unavailable',code:'PGRST503'},false],
+    [{message:'Too Many Requests',code:'PGRST429'},false],
+    [{message:'JWT expired',code:'PGRST301'},false],
+    [{message:'JWT expired',code:'PGRST303'},false],
+    [{message:'Permission denied: JWT expired',code:'PGRST303'},false],
+    [{message:'Permission denied',status:401},false],
+    [{message:'Authentication required',status:401},false],
+    [{message:'Something unexpected happened'},false],
+    [{message:'Pool not found.',code:'P0001'},true],
+    [{message:'invalid input syntax for type integer',code:'22P02'},true],
+    [{message:'duplicate key value violates unique constraint',code:'23505'},true],
+    [{message:'permission denied for table pools',code:'42501'},true],
+    [{message:'Access denied: you are not a member of this pool.'},true],
+    [{message:'Only the pool host can perform this action.'},true],
+    [{message:'Forged identity rejected: caller mismatch.'},true],
+    [{message:'new row violates row-level security policy'},true],
+  ];
+  for(const [error,expected] of cases) assert.equal(classifyCloudError(error).permanent,expected,JSON.stringify(error));
+  assert.equal(classifyCloudError({message:'TypeError: Load failed'}).state,'network_unavailable');
+  assert.equal(classifyCloudError({message:'Load failed'}).permanent,false);
+  assert.equal(classifyCloudError({message:'JWT expired',code:'PGRST301'}).state,'auth_rejected');
+  assert.equal(classifyCloudError({message:'Service Unavailable'}).state,'schema_or_query_error');
+  assert.equal(classifyCloudError({message:'Pool not found.',code:'P0001'}).state,'schema_or_query_error');
+});
+
+test('Pending queue retains every edit on retryable failures and drops only permanently rejected edits',async()=>{
+  const cfg={url:'https://test.supabase.co',anonKey:'anon-test',enabled:true};
+  const user={...member};
+  const edits=prefix=>[1,2,3].map(n=>({id:`${prefix}_${n}`,poolId:'p',createdAt:'now',kind:'action',action:{type:'lock'}}));
+
+  // Service Unavailable and JWT/session failures are retryable: all 3 edits stay queued.
+  for(const error of [{message:'Service Unavailable',code:'PGRST503'},{message:'JWT expired',code:'PGRST303'}]){
+    PoolRepository.setTestSupabaseClient({rpc:async()=>({data:null,error})},cfg);
+    await PoolRepository.savePendingCloudEdits(edits('retry'));
+    const res=await PoolRepository.flushPendingCloudEdits([pool()],user);
+    assert.equal(res.remaining,3,`${error.message} must retain every edit`);
+    assert.match(res.error,new RegExp(error.message));
+    const pending=await PoolRepository.loadPendingCloudEdits();
+    assert.equal(pending.length,3);
+    assert.match(pending[0].lastError,new RegExp(error.message));
+  }
+
+  // First edit is permanently rejected (raise exception => P0001); the next two succeed.
+  let calls=0;
+  PoolRepository.setTestSupabaseClient({rpc:async()=>{
+    calls++;
+    return calls===1
+      ? {data:null,error:{message:'Pool not found.',code:'P0001'}}
+      : {data:{ok:true},error:null};
+  }},cfg);
+  await PoolRepository.savePendingCloudEdits(edits('drop'));
+  const res=await PoolRepository.flushPendingCloudEdits([pool()],user);
+  assert.equal(res.remaining,0);
+  assert.equal(calls,3,'A permanent rejection must not block the edits after it');
+  assert.match(res.error,/Dropped 1/);
+  assert.match(res.error,/Pool not found/);
+  assert.equal((await PoolRepository.loadPendingCloudEdits()).length,0);
+
+  PoolRepository.setTestSupabaseClient(null,{url:'',anonKey:'',enabled:false});
+  await PoolRepository.clearPendingCloudEdits();
+});
+
+test('First-attempt cloud calls return queued and queue only retryable failures',async()=>{
+  const cfg={url:'https://test.supabase.co',anonKey:'anon-test',enabled:true};
+  const user={...member};
+  const attempts=[
+    ['joinCloudPoolByInvite',()=>PoolRepository.joinCloudPoolByInvite('CODE-1',user)],
+    ['createCloudPool',()=>PoolRepository.createCloudPool(pool())],
+    ['syncAtomicClaimDelta',()=>PoolRepository.syncAtomicClaimDelta('p','i',user,1)],
+    ['syncCloudPoolAction',()=>PoolRepository.syncCloudPoolAction(pool(),user,{type:'lock'})],
+  ];
+  for(const [name,invoke] of attempts){
+    await PoolRepository.clearPendingCloudEdits();
+    PoolRepository.setTestSupabaseClient({rpc:async()=>({data:null,error:{message:'Pool not found.',code:'P0001'}})},cfg);
+    let res=await invoke();
+    assert.equal(res.error!==undefined,true,`${name} must report the permanent rejection`);
+    assert.equal(res.queued,false,`${name} must not queue a permanent rejection`);
+    assert.equal((await PoolRepository.loadPendingCloudEdits()).length,0,`${name} must leave the queue empty`);
+
+    PoolRepository.setTestSupabaseClient({rpc:async()=>({data:null,error:{message:'Service Unavailable',code:'PGRST503'}})},cfg);
+    res=await invoke();
+    assert.equal(res.queued,true,`${name} must queue a retryable failure`);
+    assert.equal((await PoolRepository.loadPendingCloudEdits()).length,1,`${name} must queue exactly one edit`);
+  }
+  PoolRepository.setTestSupabaseClient(null,{url:'',anonKey:'',enabled:false});
+  await PoolRepository.clearPendingCloudEdits();
+});
+
+test('Mixed cloud rows keep healthy pools and report skipped pool names and reasons',async()=>{
+  const validRow={id:'p_valid',join_code:'VALID-1',title:'Valid Pool',supplier_name:'Supplier',supplier_badge:'Direct',category:'Produce',host_user_id:'u1',host_name:'Host',neighborhood:'Demo',pickup_address:'123 Main',pickup_window:'Sat',cutoff_time:'Fri',minimum_order_amount:100,delivery_fee:10,free_delivery_threshold:150,status:'open'};
+  const malformedRow={...validRow,id:'p_bad',join_code:'BAD-1',title:'Broken Pool',minimum_order_amount:-50};
+  const parts=[
+    {pool_id:'p_valid',user_id:'u1',user_name:'Host',is_host:true,paid_status:'pending'},
+    {pool_id:'p_bad',user_id:'u1',user_name:'Host',is_host:true,paid_status:'pending'},
+  ];
+  const collected=collectCloudPoolsFromRows([malformedRow,validRow],parts,[],[],[]);
+  assert.deepEqual(collected.pools.map(p=>p.id),['p_valid']);
+  assert.equal(collected.skipped.length,1);
+  assert.equal(collected.skipped[0].poolId,'p_bad');
+  assert.equal(collected.skipped[0].title,'Broken Pool');
+  assert.match(collected.skipped[0].error,/Minimum order/);
+  assert.deepEqual(assembleCloudPoolsFromRows([validRow],parts,[],[],[]).map(p=>p.id),['p_valid']);
+  assert.throws(()=>collectCloudPoolsFromRows([malformedRow],parts,[],[],[]),/Minimum order/);
+
+  const tableRows={pools:[malformedRow,validRow],pool_participants:parts,catalog_items:[],item_claims:[],pool_messages:[]};
+  const client={
+    auth:{getSession:async()=>({data:{session:{user:{id:'u1',email:'host@example.edu',user_metadata:{}}}},error:null})},
+    rpc:async(fn)=>({data:fn==='upsert_my_profile'?{id:'u1',name:'Host',neighborhood:'Demo',avatarColor:'#0D9488'}:{ok:true},error:null}),
+    from:(table)=>({
+      select:()=>{
+        const result={data:tableRows[table]||[],error:null};
+        return {order:async()=>result,then:(resolve,reject)=>Promise.resolve(result).then(resolve,reject)};
+      },
+    }),
+  };
+  PoolRepository.setTestSupabaseClient(client,{url:'https://test.supabase.co',anonKey:'anon-test',enabled:true});
+  await PoolRepository.clearPendingCloudEdits();
+  const loaded=await PoolRepository.loadPools();
+  assert.equal(loaded.cloudState,'synced');
+  assert.deepEqual(loaded.pools.map(p=>p.id),['p_valid']);
+  assert.equal(loaded.skipped.length,1);
+  assert.equal(loaded.skipped[0].title,'Broken Pool');
+  assert.match(loaded.error,/Broken Pool/);
+  assert.match(loaded.error,/Minimum order/);
+  PoolRepository.setTestSupabaseClient(null,{url:'',anonKey:'',enabled:false});
+  storage.delete('@poolcart_pools_v3');
+  storage.delete('@poolcart_pending_cloud_edits_v1');
+});
+
+// Exercise the actual App callbacks without starting Expo or rendering native UI.
+test('App rolls back rejected edits and creates local pools only for queued failures',async()=>{
+  const appFile=ts.createSourceFile('App.tsx',fs.readFileSync(path.join(root,'App.tsx'),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+  function callback(name,context){
+    let initializer;
+    function visit(node){
+      if(ts.isVariableDeclaration(node)&&node.name.getText(appFile)===name) initializer=node.initializer;
+      ts.forEachChild(node,visit);
+    }
+    visit(appFile);
+    assert(initializer,`Missing App callback ${name}`);
+    const code=ts.transpileModule(`const candidate = ${initializer.getText(appFile)};`,{compilerOptions:{target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.CommonJS}}).outputText;
+    return new Function(...Object.keys(context),`${code}\nreturn candidate;`)(...Object.values(context));
+  }
+  for(const queued of [false,true]){
+    const original=pool();
+    const poolsRef={current:[original]};
+    const messages=[];const saves=[];let status={};let displayed;let refreshes=0;
+    const context={ready:true,poolsRef,selectedPoolId:original.id,isCloudMode:true,cloudAuthUser:host,activeUser:host,
+      applyPoolAction:domain.applyPoolAction,normalizePools:domain.normalizePools,
+      PoolRepository:{
+        saveLocalPools:async list=>{saves.push(JSON.parse(JSON.stringify(list)));},
+        syncCloudPoolAction:async()=>({error:'Server reason',state:'schema_or_query_error',queued}),
+        createCloudPool:async()=>({error:'Server reason',state:'schema_or_query_error',queued}),
+        loadPendingCloudEdits:async()=>queued?[{id:'queued'}]:[],
+      },
+      setPoolState:list=>{displayed=list;},setStorageError:()=>{},setActionError:()=>{},
+      setSyncStatus:fn=>{status=fn(status);},reportError:error=>messages.push(error.message),
+      refreshPools:async()=>{refreshes++;},
+      setSelectedPoolId:()=>{},setSelectedCategory:()=>{},setSearchQuery:()=>{},setActiveTab:()=>{},setRerunSource:()=>{},
+    };
+    context.setPools=callback('setPools',context);
+    const result=await callback('mutate',context)({type:'claim',itemId:'i',delta:1});
+    await Promise.resolve();
+    assert.equal(result.cloudRejected,true,'Rejected claims must suppress milestone alerts');
+    assert.equal(refreshes,queued?0:1,'A rejected edit reloads server state once; a queued edit must not refresh');
+    const expected=queued?domain.applyPoolAction(original,host,{type:'claim',itemId:'i',delta:1}):original;
+    assert.deepEqual(displayed,[expected]);
+    assert.deepEqual(poolsRef.current,[expected]);
+    assert.deepEqual(saves.at(-1),JSON.parse(JSON.stringify([expected])),'The cache must match displayed state');
+    assert.equal(status.pendingLocalEditsCount,queued?1:0);
+    assert.match(status.label,queued?/queued/:/not saved/);
+    assert.match(messages.at(-1),queued?/queued/:/not saved/);
+    assert.match(messages.at(-1),/Server reason/);
+
+    poolsRef.current=[original];saves.length=0;messages.length=0;
+    await callback('handleCreatePool',context)({...pool([0,0]),id:'new_pool',joinCode:'NEW-POOL'});
+    assert.equal(poolsRef.current.length,queued?2:1);
+    assert.equal(saves.length,queued?1:0,'Rejected creation must not enter local storage');
+    assert.match(status.label,queued?/queued/:/not saved/);
+    assert.match(messages.at(-1),queued?/queued/:/not saved/);
+    assert.match(messages.at(-1),/Server reason/);
+
+    context.PoolRepository.joinCloudPoolByInvite=async code=>({error:'Server reason',state:'network_unavailable',queued,joinCode:code.trim().toUpperCase()});
+    const joinRes=await callback('handleJoinByInviteCode',context)(' alpha-01 ');
+    assert.equal(status.pendingLocalEditsCount,queued?1:0);
+    assert.match(status.label,queued?/queued/:/rejected/);
+    assert.match(joinRes.error,queued?/queued/:/Server reason/);
+  }
+});
+
+test('Offline invite joins deduplicate by code and empty_cloud clears stale local cache when no edits are pending',async()=>{
+  const cfg={url:'https://test.supabase.co',anonKey:'anon-test',enabled:true};
+  const user={...member};
+  await PoolRepository.clearPendingCloudEdits();
+  PoolRepository.setTestSupabaseClient({rpc:async()=>({data:null,error:{message:'Network request failed'}})},cfg);
+  const first=await PoolRepository.joinCloudPoolByInvite(' alpha-01 ',user);
+  const second=await PoolRepository.joinCloudPoolByInvite('ALPHA-01',user);
+  assert.equal(first.queued,true);
+  assert.equal(second.queued,true);
+  const queued=await PoolRepository.loadPendingCloudEdits();
+  assert.equal(queued.length,1,'Repeated offline invite joins for the same code must deduplicate');
+  assert.equal(queued[0].joinCode,'ALPHA-01');
+
+  await PoolRepository.clearPendingCloudEdits();
+  await PoolRepository.saveLocalPools([pool()]);
+  assert.equal((await PoolRepository.loadLocalPools()).length,1);
+
+  const emptyCloudClient={
+    auth:{getSession:async()=>({data:{session:{user:{id:'u1',email:'host@example.edu',user_metadata:{}}}},error:null})},
+    rpc:async()=>({data:{id:'u1',name:'Host',neighborhood:'Demo',avatarColor:'#0D9488'},error:null}),
+    from:()=>({
+      select:()=>{
+        const result={data:[],error:null};
+        return {order:async()=>result,then:(resolve,reject)=>Promise.resolve(result).then(resolve,reject)};
+      },
+    }),
+  };
+  PoolRepository.setTestSupabaseClient(emptyCloudClient,cfg);
+  const loaded=await PoolRepository.loadPools();
+  assert.equal(loaded.cloudState,'empty_cloud');
+  assert.equal(storage.get('@poolcart_pools_v3'),'[]','empty_cloud with 0 pending edits must clear stale cached pools');
+  PoolRepository.setTestSupabaseClient(null,{url:'',anonKey:'',enabled:false});
+  storage.delete('@poolcart_pools_v3');
+});
+
 require('./ui.cjs')(test, {assert, pool, finalized, host, member, initialPools: INITIAL_POOLS, ts});
 (async()=>{let failed=0;for(const t of tests){try{await t.run();console.log(`PASS ${t.name}`);}catch(error){failed++;console.error(`FAIL ${t.name}\n${error.stack}`);}}console.log(`\n${tests.length-failed}/${tests.length} test groups passed. No network, database, or running Expo app used.`);process.exitCode=failed?1:0;})();
