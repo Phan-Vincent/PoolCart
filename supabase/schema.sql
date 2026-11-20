@@ -438,6 +438,62 @@ begin
 end;
 $$;
 
+-- Shared catalog validation for RPCs that insert caller-supplied items.
+create or replace function public.validate_catalog_item_payload(p_item jsonb, p_require_id boolean)
+returns void
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_key text;
+  v_label text;
+  v_num numeric;
+begin
+  if p_require_id and btrim(coalesce(p_item ->> 'id', '')) = '' then
+    raise exception 'Item ID is required.';
+  end if;
+  if btrim(coalesce(p_item ->> 'name', '')) = '' or btrim(coalesce(p_item ->> 'unitLabel', '')) = '' then
+    raise exception 'Each item needs a name and unit label.';
+  end if;
+  if coalesce(p_item ->> 'mode', '') not in ('individual', 'case_split') then
+    raise exception 'Invalid item mode.';
+  end if;
+
+  foreach v_key in array array['unitPrice', 'retailPrice']
+  loop
+    v_label := case when v_key = 'unitPrice' then 'Wholesale unit price' else 'Retail unit price' end;
+    if jsonb_typeof(p_item -> v_key) is distinct from 'number' then
+      raise exception '% must be a finite number between 0.01 and 1000000.', v_label;
+    end if;
+    v_num := (p_item ->> v_key)::numeric;
+    if v_num < 0.01 or v_num > 1000000 then
+      raise exception '% must be a finite number between 0.01 and 1000000.', v_label;
+    end if;
+    if round(v_num * 100) <> v_num * 100 then
+      raise exception '% must use at most two decimal places.', v_label;
+    end if;
+  end loop;
+
+  if p_item ->> 'mode' = 'case_split' then
+    foreach v_key in array array['caseSize', 'maxCases']
+    loop
+      if v_key = 'maxCases' and (p_item -> v_key is null or p_item -> v_key = 'null'::jsonb) then
+        continue;
+      end if;
+      v_label := case when v_key = 'caseSize' then 'Shares per case' else 'Maximum cases' end;
+      if jsonb_typeof(p_item -> v_key) is distinct from 'number' then
+        raise exception '% must be a whole number between % and 1000.', v_label, case when v_key = 'caseSize' then 2 else 1 end;
+      end if;
+      v_num := (p_item ->> v_key)::numeric;
+      if v_num <> trunc(v_num) or v_num < (case when v_key = 'caseSize' then 2 else 1 end) or v_num > 1000 then
+        raise exception '% must be a whole number between % and 1000.', v_label, case when v_key = 'caseSize' then 2 else 1 end;
+      end if;
+    end loop;
+  end if;
+end;
+$$;
+
 -- 8C. Create a New Pool or Rerun Pool Atomically (`create_pool_with_catalog`)
 create or replace function public.create_pool_with_catalog(
   p_pool jsonb
@@ -457,6 +513,8 @@ declare
   v_deliv numeric := coalesce((p_pool ->> 'deliveryFee')::numeric, 0);
   v_free numeric := (p_pool ->> 'freeDeliveryThreshold')::numeric;
   v_item jsonb;
+  v_claim_elem jsonb;
+  v_num numeric;
   v_msg jsonb;
 begin
   if v_pool_id = '' or v_title = '' or v_join_code !~ '^[A-Z0-9_-]+$' then
@@ -518,36 +576,54 @@ begin
   -- Insert catalog items (and only caller's own initial claim if present)
   for v_item in select * from jsonb_array_elements(coalesce(p_pool -> 'items', '[]'::jsonb))
   loop
+    perform public.validate_catalog_item_payload(v_item, true);
     insert into public.catalog_items (
       id, pool_id, name, category, emoji, mode, unit_label, unit_price, actual_unit_price, retail_price, case_size, max_cases
     )
     values (
       v_item ->> 'id',
       v_pool_id,
-      v_item ->> 'name',
+      btrim(v_item ->> 'name'),
       coalesce(v_item ->> 'category', 'Wholesale'),
       coalesce(v_item ->> 'emoji', '🛒'),
       v_item ->> 'mode',
-      v_item ->> 'unitLabel',
+      btrim(v_item ->> 'unitLabel'),
       (v_item ->> 'unitPrice')::numeric,
       null,
       (v_item ->> 'retailPrice')::numeric,
-      (v_item ->> 'caseSize')::integer,
-      (v_item ->> 'maxCases')::integer
+      (v_item ->> 'caseSize')::numeric::integer,
+      (v_item ->> 'maxCases')::numeric::integer
     );
 
-    if jsonb_array_length(coalesce(v_item -> 'claims', '[]'::jsonb)) > 0 then
+    for v_claim_elem in select * from jsonb_array_elements(coalesce(v_item -> 'claims', '[]'::jsonb))
+    loop
+      if (v_claim_elem ->> 'userId') is not null and (v_claim_elem ->> 'userId') <> v_uid then
+        raise exception 'An added item can only contain your own claim.';
+      end if;
+      if jsonb_typeof(v_claim_elem -> 'quantity') is distinct from 'number' then
+        raise exception 'Claim quantity must be a whole number between 1 and 1000000.';
+      end if;
+      v_num := (v_claim_elem ->> 'quantity')::numeric;
+      if v_num < 1 or v_num > 1000000 or v_num <> trunc(v_num) then
+        raise exception 'Claim quantity must be a whole number between 1 and 1000000.';
+      end if;
       insert into public.item_claims (
         pool_id, item_id, user_id, user_name, avatar_color, quantity
       )
-      select
+      values (
         v_pool_id,
         v_item ->> 'id',
         v_uid,
         v_profile.display_name,
         v_profile.avatar_color,
-        greatest(1, ((v_item -> 'claims' -> 0) ->> 'quantity')::integer)
-      where ((v_item -> 'claims' -> 0) ->> 'quantity')::integer > 0;
+        v_num::integer
+      );
+    end loop;
+
+    if (v_item ->> 'mode') = 'case_split' and (v_item -> 'maxCases') is not null and (v_item -> 'maxCases') <> 'null'::jsonb then
+      if (select coalesce(sum(quantity), 0) from public.item_claims where item_id = (v_item ->> 'id')) > ((v_item ->> 'maxCases')::numeric::integer * (v_item ->> 'caseSize')::numeric::integer) then
+        raise exception 'This item has reached its case cap.';
+      end if;
     end if;
   end loop;
 
@@ -754,11 +830,18 @@ declare
   v_remove integer;
   v_deduct integer;
   v_elem jsonb;
+  v_claim_elem jsonb;
   v_wish jsonb;
   v_new_wishlist jsonb := '[]'::jsonb;
   v_found boolean := false;
   v_target_user text;
   v_due numeric;
+  v_order_changed boolean := false;
+  v_num numeric;
+  v_wish_title text;
+  v_wish_case integer;
+  v_wish_unit numeric;
+  v_wish_retail numeric;
 begin
   select * into v_pool
   from public.pools
@@ -796,27 +879,36 @@ begin
     when 'addItems' then
       for v_elem in select * from jsonb_array_elements(coalesce(p_action -> 'items', '[]'::jsonb))
       loop
+        perform public.validate_catalog_item_payload(v_elem, true);
+
         insert into public.catalog_items (
           id, pool_id, name, category, emoji, mode, unit_label, unit_price, retail_price, case_size, max_cases
         )
         values (
           v_elem ->> 'id',
           p_pool_id,
-          v_elem ->> 'name',
+          btrim(v_elem ->> 'name'),
           coalesce(v_elem ->> 'category', 'Neighborhood Addition'),
           coalesce(v_elem ->> 'emoji', '🛒'),
           v_elem ->> 'mode',
-          v_elem ->> 'unitLabel',
+          btrim(v_elem ->> 'unitLabel'),
           (v_elem ->> 'unitPrice')::numeric,
           (v_elem ->> 'retailPrice')::numeric,
-          (v_elem ->> 'caseSize')::integer,
-          (v_elem ->> 'maxCases')::integer
+          (v_elem ->> 'caseSize')::numeric::integer,
+          (v_elem ->> 'maxCases')::numeric::integer
         );
 
-        if jsonb_array_length(coalesce(v_elem -> 'claims', '[]'::jsonb)) > 0 then
-          if ((v_elem -> 'claims' -> 0) ->> 'userId') is not null
-             and ((v_elem -> 'claims' -> 0) ->> 'userId') <> v_uid then
+        for v_claim_elem in select * from jsonb_array_elements(coalesce(v_elem -> 'claims', '[]'::jsonb))
+        loop
+          if (v_claim_elem ->> 'userId') is not null and (v_claim_elem ->> 'userId') <> v_uid then
             raise exception 'An added item can only contain your own claim.';
+          end if;
+          if jsonb_typeof(v_claim_elem -> 'quantity') is distinct from 'number' then
+            raise exception 'Claim quantity must be a whole number between 1 and 1000000.';
+          end if;
+          v_num := (v_claim_elem ->> 'quantity')::numeric;
+          if v_num < 1 or v_num > 1000000 or v_num <> trunc(v_num) then
+            raise exception 'Claim quantity must be a whole number between 1 and 1000000.';
           end if;
           insert into public.item_claims (pool_id, item_id, user_id, user_name, avatar_color, quantity)
           values (
@@ -825,41 +917,63 @@ begin
             v_uid,
             v_member.user_name,
             v_member.avatar_color,
-            greatest(1, ((v_elem -> 'claims' -> 0) ->> 'quantity')::integer)
+            v_num::integer
           );
+          v_order_changed := true;
+        end loop;
+
+        if (v_elem ->> 'mode') = 'case_split' and (v_elem ->> 'maxCases') is not null then
+          if (select coalesce(sum(quantity), 0) from public.item_claims where item_id = (v_elem ->> 'id')) > ((v_elem ->> 'maxCases')::numeric::integer * (v_elem ->> 'caseSize')::numeric::integer) then
+            raise exception 'This item has reached its case cap.';
+          end if;
         end if;
       end loop;
+
+      if v_order_changed then
+        update public.pool_participants
+        set paid_status = 'pending', settled_amount = null, picked_up = false, updated_at = now()
+        where pool_id = p_pool_id;
+      end if;
 
     when 'reorder' then
       for v_elem in select * from jsonb_array_elements(coalesce(p_action -> 'receipt' -> 'items', '[]'::jsonb))
       loop
+        if jsonb_typeof(v_elem -> 'quantity') is distinct from 'number' then
+          raise exception 'Reorder quantity must be a positive whole number between 1 and 1000000.';
+        end if;
+        v_num := (v_elem ->> 'quantity')::numeric;
+        if v_num < 1 or v_num > 1000000 or v_num <> trunc(v_num) then
+          raise exception 'Reorder quantity must be a positive whole number between 1 and 1000000.';
+        end if;
+
         select * into v_item
         from public.catalog_items
         where pool_id = p_pool_id and lower(name) = lower(v_elem ->> 'name')
         for update;
 
         if not found then
+          perform public.validate_catalog_item_payload(v_elem, false);
           insert into public.catalog_items (
             id, pool_id, name, category, emoji, mode, unit_label, unit_price, retail_price, case_size
           )
           values (
             'item_' || extract(epoch from clock_timestamp())::bigint::text || '_' || substr(md5(random()::text), 1, 6),
             p_pool_id,
-            v_elem ->> 'name',
+            btrim(v_elem ->> 'name'),
             'Re-Ordered Staple',
             coalesce(v_elem ->> 'emoji', '🛒'),
             v_elem ->> 'mode',
-            v_elem ->> 'unitLabel',
+            btrim(v_elem ->> 'unitLabel'),
             (v_elem ->> 'unitPrice')::numeric,
             (v_elem ->> 'retailPrice')::numeric,
-            (v_elem ->> 'caseSize')::integer
+            (v_elem ->> 'caseSize')::numeric::integer
           )
           returning * into v_item;
         end if;
 
         insert into public.item_claims (pool_id, item_id, user_id, user_name, avatar_color, quantity)
         values (
-          p_pool_id, v_item.id, v_uid, v_member.user_name, v_member.avatar_color, (v_elem ->> 'quantity')::integer
+          p_pool_id, v_item.id, v_uid, v_member.user_name, v_member.avatar_color, v_num::integer
         )
         on conflict (item_id, user_id) do update
         set quantity = public.item_claims.quantity + excluded.quantity,
@@ -870,19 +984,43 @@ begin
             raise exception 'This item has reached its case cap.';
           end if;
         end if;
+        v_order_changed := true;
       end loop;
 
+      if v_order_changed then
+        update public.pool_participants
+        set paid_status = 'pending', settled_amount = null, picked_up = false, updated_at = now()
+        where pool_id = p_pool_id;
+      end if;
+
     when 'request' then
+      v_wish_title := btrim(coalesce(p_action -> 'wish' ->> 'title', ''));
+      if v_wish_title = '' then
+        raise exception 'Wishlist title is required.';
+      end if;
+      v_wish_case := (p_action -> 'wish' ->> 'targetCaseSize')::integer;
+      if v_wish_case is null or v_wish_case < 2 or v_wish_case > 1000 then
+        raise exception 'Wishlist shares per case must be a whole number between 2 and 1000.';
+      end if;
+      v_wish_unit := (p_action -> 'wish' ->> 'estimatedUnitPrice')::numeric;
+      v_wish_retail := coalesce((p_action -> 'wish' ->> 'estimatedRetailPrice')::numeric, v_wish_unit);
+      if v_wish_unit is null or v_wish_unit <= 0 or v_wish_unit > 1000000 or round(v_wish_unit * 100) <> v_wish_unit * 100 then
+        raise exception 'Wishlist unit price must be a positive amount with at most two decimal places.';
+      end if;
+      if v_wish_retail is null or v_wish_retail <= 0 or v_wish_retail > 1000000 or round(v_wish_retail * 100) <> v_wish_retail * 100 then
+        raise exception 'Wishlist retail price must be a positive amount with at most two decimal places.';
+      end if;
+
       v_wish := jsonb_build_object(
         'id', coalesce(p_action -> 'wish' ->> 'id', 'wish_' || substr(md5(random()::text), 1, 8)),
         'poolId', p_pool_id,
-        'title', btrim(coalesce(p_action -> 'wish' ->> 'title', '')),
+        'title', v_wish_title,
         'emoji', coalesce(p_action -> 'wish' ->> 'emoji', '📦'),
         'category', coalesce(p_action -> 'wish' ->> 'category', 'Neighbor Request'),
         'suggestedUnitLabel', coalesce(p_action -> 'wish' ->> 'suggestedUnitLabel', '1 share'),
-        'estimatedUnitPrice', (p_action -> 'wish' ->> 'estimatedUnitPrice')::numeric,
-        'estimatedRetailPrice', (p_action -> 'wish' ->> 'estimatedRetailPrice')::numeric,
-        'targetCaseSize', (p_action -> 'wish' ->> 'targetCaseSize')::integer,
+        'estimatedUnitPrice', v_wish_unit,
+        'estimatedRetailPrice', v_wish_retail,
+        'targetCaseSize', v_wish_case,
         'requestedByUserId', v_uid,
         'requestedByUserName', v_member.user_name,
         'pledgedUserIds', jsonb_build_array(v_uid),
@@ -935,7 +1073,7 @@ begin
       update public.pools set wishlist = v_new_wishlist, updated_at = now() where id = p_pool_id;
 
       declare
-        v_new_item_id text := coalesce(p_action ->> 'newItemId', 'item_' || substr(md5(random()::text), 1, 10));
+        v_new_item_id text := coalesce(nullif(btrim(coalesce(p_action ->> 'newItemId', '')), ''), 'item_' || substr(md5(random()::text), 1, 10));
         v_pledger_id text;
         v_pledger record;
       begin
@@ -962,11 +1100,24 @@ begin
             insert into public.item_claims (pool_id, item_id, user_id, user_name, avatar_color, quantity)
             values (p_pool_id, v_new_item_id, v_pledger_id, v_pledger.user_name, v_pledger.avatar_color, 1)
             on conflict (item_id, user_id) do nothing;
+            v_order_changed := true;
           end if;
         end loop;
+
+        if v_order_changed then
+          update public.pool_participants
+          set paid_status = 'pending', settled_amount = null, picked_up = false, updated_at = now()
+          where pool_id = p_pool_id;
+        end if;
       end;
 
     when 'price' then
+      if p_action -> 'price' is not null and jsonb_typeof(p_action -> 'price') <> 'null' then
+        v_num := (p_action ->> 'price')::numeric;
+        if v_num <= 0 or v_num > 1000000 or round(v_num * 100) <> v_num * 100 then
+          raise exception 'Actual unit price must be a positive amount with at most two decimal places.';
+        end if;
+      end if;
       update public.catalog_items
       set actual_unit_price = case
         when p_action -> 'price' is null or jsonb_typeof(p_action -> 'price') = 'null' then null
@@ -981,6 +1132,21 @@ begin
       where pool_id = p_pool_id;
 
     when 'receipt' then
+      if p_action -> 'trueUp' is not null and jsonb_typeof(p_action -> 'trueUp') = 'object' then
+        if (p_action -> 'trueUp' -> 'actualDeliveryFee') is not null and jsonb_typeof(p_action -> 'trueUp' -> 'actualDeliveryFee') <> 'null' then
+          v_num := (p_action -> 'trueUp' ->> 'actualDeliveryFee')::numeric;
+          if v_num < 0 or v_num > 1000000 or round(v_num * 100) <> v_num * 100 then
+            raise exception 'Actual delivery fee must be a non-negative amount with at most two decimal places.';
+          end if;
+        end if;
+        if (p_action -> 'trueUp' -> 'taxOrBagFee') is not null and jsonb_typeof(p_action -> 'trueUp' -> 'taxOrBagFee') <> 'null' then
+          v_num := (p_action -> 'trueUp' ->> 'taxOrBagFee')::numeric;
+          if v_num < 0 or v_num > 1000000 or round(v_num * 100) <> v_num * 100 then
+            raise exception 'Receipt fees must be a non-negative amount with at most two decimal places.';
+          end if;
+        end if;
+      end if;
+
       update public.pools
       set true_up = p_action -> 'trueUp',
           updated_at = now()
@@ -988,8 +1154,12 @@ begin
 
       for v_elem in select * from jsonb_array_elements(coalesce(p_action -> 'prices', '[]'::jsonb))
       loop
+        v_num := (v_elem ->> 'newPrice')::numeric;
+        if v_num is null or v_num <= 0 or v_num > 1000000 or round(v_num * 100) <> v_num * 100 then
+          raise exception 'Actual unit price must be a positive amount with at most two decimal places.';
+        end if;
         update public.catalog_items
-        set actual_unit_price = (v_elem ->> 'newPrice')::numeric
+        set actual_unit_price = v_num
         where id = (v_elem ->> 'itemId') and pool_id = p_pool_id;
       end loop;
 
@@ -1047,6 +1217,16 @@ begin
         on conflict (item_id, user_id) do update
         set quantity = public.item_claims.quantity + excluded.quantity,
             updated_at = now();
+
+        if v_item.mode = 'case_split' and v_item.max_cases is not null then
+          if (select coalesce(sum(quantity), 0) from public.item_claims where item_id = v_item.id) > v_item.max_cases * v_item.case_size then
+            raise exception 'This item has reached its case cap.';
+          end if;
+        end if;
+
+        update public.pool_participants
+        set paid_status = 'pending', settled_amount = null, picked_up = false, updated_at = now()
+        where pool_id = p_pool_id;
       end if;
 
     when 'trim' then
@@ -1081,7 +1261,14 @@ begin
           where item_id = v_item.id and user_id = v_claim.user_id;
         end if;
         v_remove := v_remove - v_deduct;
+        v_order_changed := true;
       end loop;
+
+      if v_order_changed then
+        update public.pool_participants
+        set paid_status = 'pending', settled_amount = null, picked_up = false, updated_at = now()
+        where pool_id = p_pool_id;
+      end if;
 
     when 'lock' then
       if v_pool.status = 'locked' then
@@ -1425,6 +1612,7 @@ grant select on public.user_blocks to authenticated;
 
 -- Internal helpers are called only from SECURITY DEFINER RPCs (run as owner).
 -- is_pool_member stays executable by `authenticated` because RLS policies call it.
+revoke execute on function public.validate_catalog_item_payload(jsonb, boolean) from public, anon, authenticated;
 revoke execute on function public.require_authenticated_uid() from public, anon, authenticated;
 revoke execute on function public.is_pool_host_user(text, text) from public, anon, authenticated;
 revoke execute on function public.recompute_pool_order_summary(text) from public, anon, authenticated;
