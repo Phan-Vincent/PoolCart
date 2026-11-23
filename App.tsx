@@ -553,7 +553,8 @@ export default function App() {
         email,
         password,
         displayName,
-        neighborhood
+        neighborhood,
+        pendingInviteCodeRef.current
       );
     if (requiresEmailConfirmation) {
       Alert.alert(

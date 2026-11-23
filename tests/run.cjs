@@ -128,7 +128,7 @@ test('Initial-pool sample receipt parses cleanly using explicit unit prices',()=
   const r=parser.parseReceiptTrueUpText(parser.SAMPLE_RECEIPT_OCR_TEXT,INITIAL_POOLS[0].items);assert.equal(r.errors.length,0);assert.equal(r.matches.length,4);assert.equal(r.detectedTaxOrFee,4.5);
 });
 test('Incoming app/query links and outgoing invitations carry the pool code',()=>{
-  assert.equal(math.extractPoolCodeFromUrl('poolcart://join/test-1'),'TEST-1');assert.equal(math.extractPoolCodeFromUrl('https://example.test/?pool=TEST-1'),'TEST-1');assert(math.buildShareablePoolInviteText(pool()).includes('poolcart://join/TEST-1'));assert(!math.buildShareablePoolInviteText(pool()).includes('Sample address'));
+  assert.equal(math.extractPoolCodeFromUrl('poolcart://join/test-1'),'TEST-1');assert.equal(math.extractPoolCodeFromUrl('https://example.test/?pool=TEST-1'),'TEST-1');assert(math.buildShareablePoolInviteText(pool()).includes('https://poolcart.vercel.app/join/TEST-1'));assert(!math.buildShareablePoolInviteText(pool()).includes('poolcart://'));assert.equal(math.extractPoolCodeFromUrl('https://poolcart.vercel.app/join/test-1'),'TEST-1');assert.equal(math.extractPoolCodeFromUrl('https://poolcart.vercel.app/join/test-1?code=abc123#access_token=x&type=signup'),'TEST-1');assert(!math.buildShareablePoolInviteText(pool()).includes('Sample address'));
 });
 test('Local save/load round trip preserves receipt, porch, wishlist, holds and pickup',async()=>{
   let p=finalized();p.trueUp={taxOrBagFee:1,receiptNote:'test',actualDeliveryFee:2};p.porchCheckIn={status:'ready_on_porch',coolerLocationNote:'test',accessCodeOrPin:'demo'};p=apply(p,member,{type:'authorizeDemo',userId:'n'});p=apply(p,host,{type:'pickup',userId:'n'});await PoolRepository.saveLocalPools([p]);assert.deepEqual(await PoolRepository.loadLocalPools(),domain.normalizePools([p]));
@@ -1132,6 +1132,18 @@ test('Account deletion calls the server RPC, then clears the session and cached 
     assert.deepEqual(calls,['delete_my_account',['signOut',{scope:'local'}]]);
     assert.deepEqual(await PoolRepository.loadLocalPools(),[]);
     assert.deepEqual(await PoolRepository.loadPendingCloudEdits(),[]);
+  });
+});
+test('Signing up from an invite link sends the email confirmation back to that invite',async()=>{
+  await withHostedBuild(async()=>{
+    const signUps=[];
+    mockSupabaseFactory=()=>({auth:{signUp:async(args)=>{signUps.push(args);return {data:{session:null},error:null};},getSession:async()=>({data:{session:null},error:null})}});
+    await PoolRepository.initConfig();
+    const res=await PoolRepository.signUpCloudAccount('New@Example.com','pw123456','Nina','Elm St','TEST-1');
+    assert.equal(res.requiresEmailConfirmation,true);
+    assert.equal(signUps[0].options.emailRedirectTo,'https://poolcart.vercel.app/join/TEST-1');
+    await PoolRepository.signUpCloudAccount('b@example.com','pw123456','Bo','Elm St');
+    assert.equal('emailRedirectTo' in signUps[1].options,false,'no invite means the default Site URL redirect');
   });
 });
 test('SQL schema grants self-service account deletion to signed-in users only',()=>{

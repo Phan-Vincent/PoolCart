@@ -34,3 +34,20 @@ export function isHostedBuild(): boolean {
 export function getPrivacyPolicyUrl(): string {
   return (process.env.EXPO_PUBLIC_PRIVACY_POLICY_URL || '').trim();
 }
+
+/**
+ * Public origin of the PoolCart web app. Invite links point here so they work
+ * for everyone: with the app installed, iOS Universal Links / Android App Links
+ * open it in the app; without it, the link opens the web app.
+ */
+export const DEFAULT_WEB_APP_URL = 'https://poolcart.vercel.app';
+
+export function getWebAppUrl(): string {
+  const configured = (process.env.EXPO_PUBLIC_WEB_URL || '').trim();
+  return (configured || DEFAULT_WEB_APP_URL).replace(/\/+$/, '');
+}
+
+/** Shareable https invite link for a pool, e.g. https://poolcart.vercel.app/join/ABC123 */
+export function buildPoolJoinUrl(joinCode: string): string {
+  return `${getWebAppUrl()}/join/${encodeURIComponent(joinCode)}`;
+}

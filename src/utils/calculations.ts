@@ -1,4 +1,5 @@
 import { CatalogItem, GroupBuyPool, UserCostBreakdown } from '../types/groupBuy';
+import { buildPoolJoinUrl } from '../config/appMode';
 
 export interface CaseSplitStatus {
   totalClaimedUnits: number;
@@ -33,13 +34,15 @@ export function getEffectiveUnitPrice(item: CatalogItem): number {
 export function extractPoolCodeFromUrl(rawUrl: string | null | undefined): string | null {
   if (!rawUrl) return null;
   try {
-    const queryMatch = rawUrl.match(/[?&](?:pool|code)=([A-Za-z0-9_-]+)/i);
-    if (queryMatch && queryMatch[1]) {
-      return queryMatch[1].toUpperCase();
-    }
+    // The /join/CODE path wins over query params: an email-confirmation
+    // redirect back to an invite can carry Supabase's own ?code=... param.
     const pathMatch = rawUrl.match(/\/join\/([A-Za-z0-9_-]+)/i);
     if (pathMatch && pathMatch[1]) {
       return pathMatch[1].toUpperCase();
+    }
+    const queryMatch = rawUrl.match(/[?&](?:pool|code)=([A-Za-z0-9_-]+)/i);
+    if (queryMatch && queryMatch[1]) {
+      return queryMatch[1].toUpperCase();
     }
   } catch {
     return null;
@@ -297,7 +300,7 @@ export function buildShareablePoolInviteText(pool: GroupBuyPool): string {
   return (
     `🥬 Join our neighborhood grocery group buy on PoolCart!\n` +
     `🔑 Pool Invite Code: ${pool.joinCode}\n` +
-    `Open in installed app: poolcart://join/${encodeURIComponent(pool.joinCode)}\n` +
+    `Join here: ${buildPoolJoinUrl(pool.joinCode)}\n` +
     `Pool: ${pool.title} (${pool.supplierName})\n` +
     `Host: ${pool.hostName} • Pickup: ${pool.pickupWindow}\n` +
     `Progress: $${summary.combinedPoolTotal.toFixed(2)} / $${pool.minimumOrderAmount} minimum (${

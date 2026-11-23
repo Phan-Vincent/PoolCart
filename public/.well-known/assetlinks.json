@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.poolcart.grocerygroupbuy",
+      "sha256_cert_fingerprints": [
+        "BF:E7:11:B9:94:46:4A:5C:6B:F7:0A:AE:4B:FF:F1:67:01:00:0C:12:36:12:07:AE:28:B0:63:1C:02:09:CD:07"
+      ]
+    }
+  }
+]

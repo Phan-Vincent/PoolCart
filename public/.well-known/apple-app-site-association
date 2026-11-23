@@ -1,0 +1,13 @@
+{
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appID": "77FQBK9E92.com.poolcart.grocerygroupbuy",
+        "appIDs": ["77FQBK9E92.com.poolcart.grocerygroupbuy"],
+        "paths": ["/join/*"],
+        "components": [{ "/": "/join/*", "comment": "Pool invite links" }]
+      }
+    ]
+  }
+}

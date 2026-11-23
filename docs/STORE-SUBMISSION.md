@@ -25,6 +25,24 @@ Still to do in the dashboard:
 - Remove the stray `EXPO_PUBLIC_TEST_PROBE` env var: `vercel env rm EXPO_PUBLIC_TEST_PROBE production` (the CLI needs you to confirm interactively).
 - In Supabase: **Authentication → URL Configuration → Site URL** = `https://poolcart.vercel.app`. This is what email confirmation links point to.
 
+### Invite links (Universal Links / App Links) — added 2026-11-17
+
+Invites share `https://poolcart.vercel.app/join/CODE`. Neighbors without the app get the web app, which keeps the code through sign-in. With the app installed, the link opens the app instead. The old `poolcart://` scheme still works as a fallback but is no longer shared.
+
+- `public/.well-known/apple-app-site-association` covers `/join/*` for app ID `77FQBK9E92.com.poolcart.grocerygroupbuy`. `vercel.json` serves it as `application/json`.
+- `public/.well-known/assetlinks.json` lists the EAS upload keystore's SHA-256 (`BF:E7:11:…:CD:07`, from `eas credentials -p android`).
+- `app.json` adds `ios.associatedDomains` and an Android `https` intent filter with `autoVerify` for `/join/`.
+- If the domain changes, update all three plus `EXPO_PUBLIC_WEB_URL` (defaults to `https://poolcart.vercel.app`).
+
+Done 2026-11-18:
+- Deployed to Vercel. Both `.well-known` files return `application/json`, and `/join/CODE` loads the app's sign-in screen with "Sign in or create an account to join pool CODE". (The catch-all rewrite now targets `/`. With `cleanUrls`, the old `/index.html` target returned 404 for every path except `/` and `/privacy`.)
+- iOS build 1.0.0 (7): EAS enabled Associated Domains on the App ID and updated the App Store profile `4TM96FKQ5V`. Build finished. Android build 1.0.0 (4) uses the same upload keystore listed in `assetlinks.json`.
+- Supabase Redirect URLs include `https://poolcart.vercel.app/**`.
+
+Still to do:
+- Submit iOS build 7 to TestFlight and check that tapping a `/join/` link in Notes or Messages opens the app. Pasting it into Safari's address bar never opens the app.
+- **After the app is created in Play Console:** copy the **App signing key** SHA-256 from Play Console → Test and release → App integrity, add it to `assetlinks.json` next to the upload key, and redeploy. Apps installed from Play are signed with Google's key, so links won't verify without it.
+
 ## 3. EAS — set up 2026-11-12
 
 - Expo project **@phanvincent/poolcart** (ID `1dbf10f7-fe5b-4255-bd18-89b88358aab6`), owned by the personal `phanvincent` account. It can be transferred to `phanvincents-team` later from the Expo dashboard.
