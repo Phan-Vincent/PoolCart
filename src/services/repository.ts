@@ -10,7 +10,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import { CURRENT_USER, INITIAL_POOLS } from '../data/mockPools';
 import type { ReportReason } from '../utils/contentFilter';
-import { getHostedCloudConfig, isHostedBuild } from '../config/appMode';
+import { buildPoolJoinUrl, getHostedCloudConfig, isHostedBuild } from '../config/appMode';
 import {
   AtomicClaimResult,
   CatalogItem,
@@ -740,7 +740,8 @@ export const PoolRepository = {
     email: string,
     password: string,
     displayName: string,
-    neighborhood: string
+    neighborhood: string,
+    pendingInviteCode?: string | null
   ): Promise<{ user: Participant | null; requiresEmailConfirmation?: boolean }> {
     const client = getOrCreateSupabaseClient();
     if (!client) {
@@ -760,6 +761,12 @@ export const PoolRepository = {
       email: cleanEmail,
       password,
       options: {
+        // A neighbor who signed up from an invite link lands back on that
+        // invite after confirming their email, so the join code isn't lost.
+        // Supabase falls back to the Site URL if this isn't an allowed redirect.
+        ...(pendingInviteCode
+          ? { emailRedirectTo: buildPoolJoinUrl(pendingInviteCode) }
+          : {}),
         data: {
           display_name: cleanName,
           neighborhood: cleanHood,

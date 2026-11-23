@@ -14,6 +14,7 @@ import {
   buildShareablePoolInviteText,
   getPoolProgressSummary,
 } from '../utils/calculations';
+import { buildPoolJoinUrl } from '../config/appMode';
 
 interface Props {
   visible: boolean;
@@ -30,6 +31,7 @@ export const PilotFlyerModal: React.FC<Props> = ({
 }) => {
   const [tab, setTab] = useState<'flyer' | 'onboarding'>(initialView);
   const summary = getPoolProgressSummary(pool);
+  const joinUrl = buildPoolJoinUrl(pool.joinCode);
 
 
   const handleSharePoster = async () => {
@@ -100,11 +102,11 @@ export const PilotFlyerModal: React.FC<Props> = ({
                   <View style={styles.codeInfoCol}>
                     <Text style={styles.joinCodeLabel}>POOL INVITE CODE</Text>
                     <Text style={styles.joinCodeBig}>{pool.joinCode}</Text>
-                    <TouchableOpacity onPress={() => Linking.openURL(`poolcart://join/${encodeURIComponent(pool.joinCode)}`).catch(() => undefined)}>
-                      <Text style={styles.deepLinkText}>poolcart://join/{pool.joinCode}</Text>
+                    <TouchableOpacity onPress={() => Linking.openURL(joinUrl).catch(() => undefined)}>
+                      <Text style={styles.deepLinkText}>{joinUrl.replace(/^https?:\/\//, '')}</Text>
                     </TouchableOpacity>
                     <Text style={styles.webLinkText}>
-                      Neighbors enter this code under “Join by Code”
+                      Open the link, or enter this code under “Join by Code”
                     </Text>
                   </View>
                 </View>
