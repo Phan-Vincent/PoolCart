@@ -46,6 +46,7 @@ Builds without the two Supabase variables run as the local demo, so check that t
 
 - **iOS:** Apple team Vincent Phan (Individual) `77FQBK9E92`. EAS-managed distribution certificate and App Store provisioning profile, both valid until 2027-11-14. Build 1.0.0 (5) was submitted to App Store Connect app **6834996608** (pinned as `ascAppId` in `eas.json`). The TestFlight group "Team (Expo)" includes phanvincent2@gmail.com. An ASC API key is stored on EAS, so `eas submit --platform ios --latest` no longer needs your password.
 - **Android:** EAS-managed upload keystore. Production `.aab` 1.0.0 (2) is built but not yet uploaded; the first upload goes through Play Console → Internal testing by hand. `eas build -p android --profile preview` makes a sideloadable `.apk` against the production backend.
+- **SDK / Xcode:** the app is on Expo SDK 58 (React Native 0.88, React 19.3). EAS's default `sdk-58` image builds iOS with Xcode 27, which clears Apple's ITMS-90725 warning (from April 2027, uploads need the iOS 27 SDK). SDK 58 uses the iOS UIKit scene life cycle; prebuild generates `SceneDelegate.swift` and the `UIApplicationSceneManifest` automatically. Don't commit an `ios/` folder.
 - **Don't delete** the keystore or certificates in the Expo dashboard. Play requires every update to be signed with the same upload key.
 
 ## 4. Accounts, reviewer demo pool, and store review notes

@@ -57,7 +57,8 @@
           "resizeMode": "contain",
           "backgroundColor": "#0D9488"
         }
-      ]
+      ],
+      "expo-status-bar"
     ],
     "extra": {
       "eas": {
