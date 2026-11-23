@@ -9,6 +9,7 @@ import { createWriteQueue } from './storageQueue';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import { CURRENT_USER, INITIAL_POOLS } from '../data/mockPools';
+import type { ReportReason } from '../utils/contentFilter';
 import { buildPoolJoinUrl, getHostedCloudConfig, isHostedBuild } from '../config/appMode';
 import {
   AtomicClaimResult,
@@ -29,6 +30,7 @@ const STORAGE_KEY_POOLS = '@poolcart_pools_v3';
 const STORAGE_KEY_SUPABASE_CONFIG = '@poolcart_supabase_config_v1';
 const STORAGE_KEY_ACTIVE_USER = '@poolcart_active_user_v1';
 const STORAGE_KEY_PENDING_CLOUD_EDITS = '@poolcart_pending_cloud_edits_v1';
+const STORAGE_KEY_BLOCKED_USERS = '@poolcart_blocked_users_v1';
 
 export interface SupabaseConfig {
   url: string;
@@ -830,6 +832,70 @@ export const PoolRepository = {
       // Session cleanup failure must not mask a completed deletion.
     }
     await this.clearSignedInDeviceData();
+  },
+
+  /**
+   * IDs of neighbors this person has blocked. Signed-in accounts read them
+   * from the server (where blocks also hide messages through row-level
+   * security); the local demo keeps them on this device.
+   */
+  async loadBlockedUserIds(): Promise<string[]> {
+    if (currentConfig.enabled) {
+      const client = getOrCreateSupabaseClient();
+      if (!client) return [];
+      const { data, error } = await client.from('user_blocks').select('blocked_id');
+      if (error) throw new Error(error.message || 'Could not load blocked neighbors.');
+      return (data || []).map((row: { blocked_id: unknown }) => String(row.blocked_id));
+    }
+    try {
+      const raw = await AsyncStorage.getItem(STORAGE_KEY_BLOCKED_USERS);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch {
+      return [];
+    }
+  },
+
+  /** Blocks or unblocks a neighbor and returns the updated list of blocked IDs. */
+  async setUserBlocked(userId: string, blocked: boolean): Promise<string[]> {
+    if (!userId) throw new Error('Choose someone to block.');
+    if (currentConfig.enabled) {
+      const client = getOrCreateSupabaseClient();
+      if (!client) throw new Error('Sign in to your PoolCart account first.');
+      const { error } = await client.rpc(blocked ? 'block_user' : 'unblock_user', {
+        p_blocked_id: userId,
+      });
+      if (error) {
+        throw new Error(
+          error.message || (blocked ? 'Could not block this neighbor.' : 'Could not unblock this neighbor.')
+        );
+      }
+      return this.loadBlockedUserIds();
+    }
+    const current = await this.loadBlockedUserIds();
+    const next = blocked
+      ? Array.from(new Set([...current, userId]))
+      : current.filter((id) => id !== userId);
+    await enqueueWrite(() => AsyncStorage.setItem(STORAGE_KEY_BLOCKED_USERS, JSON.stringify(next)));
+    return next;
+  },
+
+  /**
+   * Sends a report about a chat message to PoolCart for review. Only signed-in
+   * accounts can report; the local demo has no one to send it to.
+   */
+  async reportMessage(messageId: string, reason: ReportReason, details?: string): Promise<void> {
+    if (!currentConfig.enabled) {
+      throw new Error('Reports can be sent only from a signed-in PoolCart account.');
+    }
+    const client = getOrCreateSupabaseClient();
+    if (!client) throw new Error('Sign in to your PoolCart account first.');
+    const { error } = await client.rpc('report_pool_message', {
+      p_message_id: messageId,
+      p_reason: reason,
+      p_details: details?.trim() || null,
+    });
+    if (error) throw new Error(error.message || 'Could not send the report. Please try again.');
   },
 
   async loadActiveUser(): Promise<Participant> {

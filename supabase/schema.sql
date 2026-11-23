@@ -152,9 +152,49 @@ create index if not exists idx_catalog_items_pool_id on public.catalog_items (po
 create index if not exists idx_item_claims_pool_id on public.item_claims (pool_id);
 create index if not exists idx_pool_messages_pool_id on public.pool_messages (pool_id);
 
+-- 6B. Chat Safety: Blocks and Reports (App Store Review Guideline 1.2)
+-- A block hides the blocked person's messages from the blocker in every pool.
+-- Reports are read by the operator in the Supabase dashboard (no client access).
+create table if not exists public.user_blocks (
+  blocker_id text not null,
+  blocked_id text not null,
+  created_at timestamptz not null default now(),
+  primary key (blocker_id, blocked_id),
+  check (blocker_id <> blocked_id)
+);
+
+create table if not exists public.content_reports (
+  id bigint generated always as identity primary key,
+  reporter_id text not null,
+  reported_user_id text not null,
+  pool_id text,
+  message_id text,
+  message_text text not null,
+  reason text not null check (reason in ('spam', 'harassment', 'offensive', 'other')),
+  details text check (details is null or char_length(details) <= 1000),
+  status text not null default 'open' check (status in ('open', 'actioned', 'dismissed')),
+  created_at timestamptz not null default now()
+);
+
+create unique index if not exists idx_content_reports_one_per_message
+  on public.content_reports (reporter_id, message_id);
+create index if not exists idx_content_reports_open
+  on public.content_reports (created_at) where status = 'open';
+
 -- ============================================================================
 -- 7. Helper Authorization Functions (Server Identity Enforcement)
 -- ============================================================================
+
+-- Objectionable-language filter for chat. Mirrors BLOCKED_TERMS in
+-- src/utils/contentFilter.ts; keep both lists identical (a test checks this).
+create or replace function public.contains_blocked_terms(p_text text)
+returns boolean
+language sql
+immutable
+set search_path = public, pg_temp
+as $$
+  select coalesce(p_text, '') ~* '\m(fuck|motherfuck|shit|shitty|bullshit|bitch|cunt|asshole|dickhead|bastard|whore|slut|fag|faggot|nigger|nigga|retard|kike|tranny)(s|es|y|ing|ed|er|ers)?\M'
+$$;
 
 create or replace function public.require_authenticated_uid()
 returns text
@@ -589,6 +629,9 @@ begin
 
   for v_msg in select * from jsonb_array_elements(coalesce(p_pool -> 'messages', '[]'::jsonb))
   loop
+    if public.contains_blocked_terms(v_msg ->> 'text') then
+      raise exception 'That message has language that isn''t allowed in PoolCart. Please reword it.';
+    end if;
     insert into public.pool_messages (
       id, pool_id, user_id, user_name, avatar_color, is_host, is_announcement, text, created_at_label
     )
@@ -1134,6 +1177,9 @@ begin
       if coalesce((p_action -> 'message' ->> 'isAnnouncement')::boolean, false) and not v_is_host then
         raise exception 'Only the host can pin an announcement.';
       end if;
+      if public.contains_blocked_terms(p_action -> 'message' ->> 'text') then
+        raise exception 'That message has language that isn''t allowed in PoolCart. Please reword it.';
+      end if;
       insert into public.pool_messages (
         id, pool_id, user_id, user_name, avatar_color, is_host, is_announcement, text, created_at_label
       )
@@ -1326,6 +1372,10 @@ begin
   -- Chat messages everywhere
   delete from public.pool_messages where user_id = v_uid;
 
+  -- Blocks and reports involving the caller
+  delete from public.user_blocks where blocker_id = v_uid or blocked_id = v_uid;
+  delete from public.content_reports where reporter_id = v_uid or reported_user_id = v_uid;
+
   -- Open pools: remove claims and membership
   delete from public.item_claims c
   using public.pools p
@@ -1379,6 +1429,84 @@ begin
 end;
 $$;
 
+-- 8G. Chat Safety RPCs: report a message, block and unblock a neighbor
+create or replace function public.report_pool_message(
+  p_message_id text,
+  p_reason text,
+  p_details text default null
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_uid text := public.require_authenticated_uid();
+  v_msg public.pool_messages%rowtype;
+  v_details text := nullif(btrim(coalesce(p_details, '')), '');
+begin
+  select * into v_msg from public.pool_messages where id = p_message_id;
+  if not found or not public.is_pool_member(v_msg.pool_id, v_uid) then
+    raise exception 'That message no longer exists.';
+  end if;
+  if v_msg.user_id = v_uid then
+    raise exception 'You cannot report your own message.';
+  end if;
+  if coalesce(p_reason, '') not in ('spam', 'harassment', 'offensive', 'other') then
+    raise exception 'Choose a reason for the report.';
+  end if;
+  if v_details is not null and char_length(v_details) > 1000 then
+    raise exception 'Report details must be 1000 characters or fewer.';
+  end if;
+
+  insert into public.content_reports (
+    reporter_id, reported_user_id, pool_id, message_id, message_text, reason, details
+  )
+  values (v_uid, v_msg.user_id, v_msg.pool_id, v_msg.id, v_msg.text, p_reason, v_details)
+  on conflict (reporter_id, message_id) do nothing;
+
+  return jsonb_build_object('ok', true, 'messageId', v_msg.id);
+end;
+$$;
+
+create or replace function public.block_user(p_blocked_id text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_uid text := public.require_authenticated_uid();
+  v_target text := btrim(coalesce(p_blocked_id, ''));
+begin
+  if v_target = '' then
+    raise exception 'Choose someone to block.';
+  end if;
+  if v_target = v_uid then
+    raise exception 'You cannot block yourself.';
+  end if;
+  insert into public.user_blocks (blocker_id, blocked_id)
+  values (v_uid, v_target)
+  on conflict do nothing;
+  return jsonb_build_object('ok', true, 'blockedUserId', v_target);
+end;
+$$;
+
+create or replace function public.unblock_user(p_blocked_id text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_uid text := public.require_authenticated_uid();
+begin
+  delete from public.user_blocks
+  where blocker_id = v_uid and blocked_id = btrim(coalesce(p_blocked_id, ''));
+  return jsonb_build_object('ok', true);
+end;
+$$;
+
 -- ============================================================================
 -- 9. Row-Level Security (Member-Scoped Read, RPC-Enforced Mutations)
 -- ============================================================================
@@ -1389,6 +1517,8 @@ alter table public.pool_participants enable row level security;
 alter table public.catalog_items enable row level security;
 alter table public.item_claims enable row level security;
 alter table public.pool_messages enable row level security;
+alter table public.user_blocks enable row level security;
+alter table public.content_reports enable row level security;
 
 -- Drop any legacy open or blanket-deny policies
 drop policy if exists "Allow public read/write on pools" on public.pools;
@@ -1402,6 +1532,7 @@ drop policy if exists "Pool members can read participants" on public.pool_partic
 drop policy if exists "Pool members can read catalog items" on public.catalog_items;
 drop policy if exists "Pool members can read item claims" on public.item_claims;
 drop policy if exists "Pool members can read pool messages" on public.pool_messages;
+drop policy if exists "Users can read their own blocks" on public.user_blocks;
 drop policy if exists "Users can read and update own profile" on public.user_profiles;
 
 -- Only authenticated members of a pool can read that pool's rows (including pickup address & porch PIN)
@@ -1428,7 +1559,19 @@ create policy "Pool members can read item claims"
 create policy "Pool members can read pool messages"
   on public.pool_messages for select
   to authenticated
-  using (public.is_pool_member(pool_id, (select auth.uid())::text));
+  using (
+    public.is_pool_member(pool_id, (select auth.uid())::text)
+    and not exists (
+      select 1 from public.user_blocks b
+      where b.blocker_id = (select auth.uid())::text
+        and b.blocked_id = pool_messages.user_id
+    )
+  );
+
+create policy "Users can read their own blocks"
+  on public.user_blocks for select
+  to authenticated
+  using (blocker_id = (select auth.uid())::text);
 
 create policy "Users can read and update own profile"
   on public.user_profiles for select
@@ -1455,6 +1598,17 @@ revoke execute on function public.join_pool_by_invite(text, text, text, text) fr
 revoke execute on function public.create_pool_with_catalog(jsonb) from public, anon;
 revoke execute on function public.upsert_my_profile(text, text, text) from public, anon;
 revoke execute on function public.delete_my_account() from public, anon;
+revoke execute on function public.report_pool_message(text, text, text) from public, anon;
+revoke execute on function public.block_user(text) from public, anon;
+revoke execute on function public.unblock_user(text) from public, anon;
+revoke execute on function public.contains_blocked_terms(text) from public, anon, authenticated;
+
+-- Blocks: users read their own rows; changes go through block_user/unblock_user.
+-- Reports: no client access at all; the operator reviews them in the dashboard.
+revoke all on public.user_blocks, public.content_reports from public, anon;
+revoke all on public.content_reports from authenticated;
+revoke insert, update, delete, truncate on public.user_blocks from authenticated;
+grant select on public.user_blocks to authenticated;
 
 -- Internal helpers are called only from SECURITY DEFINER RPCs (run as owner).
 -- is_pool_member stays executable by `authenticated` because RLS policies call it.
@@ -1471,6 +1625,9 @@ grant execute on function public.join_pool_by_invite(text, text, text, text) to 
 grant execute on function public.create_pool_with_catalog(jsonb) to authenticated;
 grant execute on function public.upsert_my_profile(text, text, text) to authenticated;
 grant execute on function public.delete_my_account() to authenticated;
+grant execute on function public.report_pool_message(text, text, text) to authenticated;
+grant execute on function public.block_user(text) to authenticated;
+grant execute on function public.unblock_user(text) to authenticated;
 
 -- 10. Enable Supabase Realtime on all 5 pool tables
 do $$

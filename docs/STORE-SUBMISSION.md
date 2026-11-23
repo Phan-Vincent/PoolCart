@@ -64,6 +64,7 @@ Builds without the two Supabase variables run as the local demo, so check that t
 
 - **iOS:** Apple team Vincent Phan (Individual) `77FQBK9E92`. EAS-managed distribution certificate and App Store provisioning profile, both valid until 2027-11-14. Build 1.0.0 (5) was submitted to App Store Connect app **6834996608** (pinned as `ascAppId` in `eas.json`). The TestFlight group "Team (Expo)" includes phanvincent2@gmail.com. An ASC API key is stored on EAS, so `eas submit --platform ios --latest` no longer needs your password.
 - **Android:** EAS-managed upload keystore. Production `.aab` 1.0.0 (2) is built but not yet uploaded; the first upload goes through Play Console → Internal testing by hand. `eas build -p android --profile preview` makes a sideloadable `.apk` against the production backend.
+- **SDK / Xcode:** the app is on Expo SDK 58 (React Native 0.88, React 19.3). EAS's default `sdk-58` image builds iOS with Xcode 27, which clears Apple's ITMS-90725 warning (from April 2027, uploads need the iOS 27 SDK). SDK 58 uses the iOS UIKit scene life cycle; prebuild generates `SceneDelegate.swift` and the `UIApplicationSceneManifest` automatically. Don't commit an `ios/` folder.
 - **Don't delete** the keystore or certificates in the Expo dashboard. Play requires every update to be signed with the same upload key.
 
 ## 4. Accounts, reviewer demo pool, and store review notes
@@ -205,6 +206,36 @@ Data collected (all linked to the user, none used for tracking, none shared for 
 - Tracking: **No**. No analytics or ad SDKs.
 - Data encrypted in transit: **Yes**. Users can request deletion: **Yes**, in-app (Account → Delete account).
 - Google Play also requires a **web** deletion path. The privacy policy's email fallback covers it; link the policy's "Retention and deletion" section in the Data safety form.
+
+## 6. Chat safety (App Review Guideline 1.2)
+
+Pool chat is user-generated content, so Apple expects a filter, a way to report, a way to block, and published contact info. The app now has all four:
+
+- **Filter:** `public.contains_blocked_terms()` rejects messages with common slurs and profanity on the server; `src/utils/contentFilter.ts` mirrors the list so the app shows the error before sending. Keep the two lists identical (`npm test` checks).
+- **Report:** Report under any other neighbor's message calls `report_pool_message`, which stores a snapshot in `public.content_reports`. Neither app users nor the public API can read that table.
+- **Block:** Block calls `block_user`; the read policy on `pool_messages` then hides that person's messages from the blocker in every pool. Unblock from the Blocked neighbors list at the bottom of the chat.
+- **Contact:** the privacy policy's "Reporting and blocking" section, with the contact email.
+
+To go live:
+
+1. Apply the schema changes to `poolcart-prod` as the next migration (`poolcart_07_chat_safety`): sections 6B, the filter function in 7, the `message` checks in 8, 8G, the new `pool_messages` read policy, and the new grants. `supabase/schema.sql` is re-runnable, and `npm run test:sql` exercises all of it.
+2. Redeploy the website (`vercel deploy --prod`) so the updated privacy policy is live.
+3. Make a new iOS build; builds up to 1.0.0 (7) were made before this change and don't have these controls.
+4. In App Review notes, say: "Report and Block appear under every message from another member in a pool's Chat tab. Reports are reviewed by the developer."
+
+Reviewing reports (Supabase → SQL Editor):
+
+```sql
+select id, created_at, reason, details, message_text, reported_user_id, pool_id, message_id
+from public.content_reports where status = 'open' order by created_at;
+
+-- After acting on one:
+update public.content_reports set status = 'actioned' where id = <id>;   -- or 'dismissed'
+-- Remove an offending message:
+delete from public.pool_messages where id = '<message_id>';
+```
+
+Check for open reports at least daily while the app is in review or on the store.
 
 ## Still open after this (not store blockers)
 
